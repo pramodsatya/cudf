@@ -15,6 +15,7 @@
 #include <functional>
 #include <numeric>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 namespace CUDF_EXPORT cudf {
@@ -282,6 +283,14 @@ class expression_parser {
   std::vector<cudf::size_type> _operator_arities;
   std::vector<cudf::size_type> _operator_source_indices;
   std::vector<generic_scalar_device_view> _literals;
+
+  // In-tree CSE: when the host builds an AST that reuses the same
+  // expression pointer for structurally equal sub-trees, the parser
+  // collapses them into one operator and keeps the shared intermediate
+  // slot alive across every consumer.
+  std::unordered_map<expression const*, cudf::size_type> _parent_count;
+  std::unordered_map<expression const*, cudf::size_type> _operation_to_data_ref;
+  std::unordered_map<cudf::size_type, cudf::size_type> _intermediate_refcount;
 };
 
 }  // namespace ast::detail

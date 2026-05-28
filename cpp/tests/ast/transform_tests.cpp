@@ -416,6 +416,148 @@ TYPED_TEST(TransformTest, ImbalancedTreeArithmetic)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, result->view(), verbosity);
 }
 
+// In-tree common sub-expression elimination tests. The expression_parser
+// collapses two structurally equal sub-trees into one operator in the emitted
+// plan when the host hands the same `expression*` to multiple parents. The
+// tests below exercise this path through `ast::tree`, where reusing a single
+// `tree.push(...)` reference in multiple operands is what produces the
+// pointer identity the parser deduplicates on.
+
+TYPED_TEST(TransformTest, SharedSubtreeAcrossSiblings)
+{
+  using Executor = TypeParam;
+
+  auto c_0   = column_wrapper<int32_t>{3, 20, 1, 50};
+  auto c_1   = column_wrapper<int32_t>{10, 7, 20, 0};
+  auto table = cudf::table_view{{c_0, c_1}};
+
+  // Build (a + b) * (a + b) where both sides reuse the same `(a + b)` node.
+  cudf::ast::tree tree;
+  auto const& col_ref_0 = tree.push(cudf::ast::column_reference(0));
+  auto const& col_ref_1 = tree.push(cudf::ast::column_reference(1));
+  auto const& sum =
+    tree.push(cudf::ast::operation(cudf::ast::ast_operator::ADD, col_ref_0, col_ref_1));
+  auto const& root = tree.push(cudf::ast::operation(cudf::ast::ast_operator::MUL, sum, sum));
+
+  auto result   = Executor::compute_column(table, root);
+  auto expected = column_wrapper<int32_t>{169, 729, 441, 2500};
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, result->view(), verbosity);
+}
+
+TYPED_TEST(TransformTest, SharedSubtreeMultipleConsumers)
+{
+  using Executor = TypeParam;
+
+  auto c_0   = column_wrapper<int32_t>{2, 3, 4, 5};
+  auto c_1   = column_wrapper<int32_t>{1, 1, 1, 1};
+  auto table = cudf::table_view{{c_0, c_1}};
+
+  // Build ((a*b) + (a*b)) + ((a*b) + (a*b)) so the same `(a*b)` operation has
+  // four distinct parent references. The intermediate slot must stay live
+  // across all four consumers; releasing it after the first parent would
+  // corrupt the result.
+  cudf::ast::tree tree;
+  auto const& col_ref_0 = tree.push(cudf::ast::column_reference(0));
+  auto const& col_ref_1 = tree.push(cudf::ast::column_reference(1));
+  auto const& product =
+    tree.push(cudf::ast::operation(cudf::ast::ast_operator::MUL, col_ref_0, col_ref_1));
+  auto const& left_sum =
+    tree.push(cudf::ast::operation(cudf::ast::ast_operator::ADD, product, product));
+  auto const& right_sum =
+    tree.push(cudf::ast::operation(cudf::ast::ast_operator::ADD, product, product));
+  auto const& root =
+    tree.push(cudf::ast::operation(cudf::ast::ast_operator::ADD, left_sum, right_sum));
+
+  auto result   = Executor::compute_column(table, root);
+  auto expected = column_wrapper<int32_t>{8, 12, 16, 20};
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, result->view(), verbosity);
+}
+
+TYPED_TEST(TransformTest, SharedSubtreeNestedSharing)
+{
+  using Executor = TypeParam;
+
+  auto c_0   = column_wrapper<double>{1.0, 2.0, 3.0, 4.0};
+  auto c_1   = column_wrapper<double>{1.0, 1.0, 1.0, 1.0};
+  auto table = cudf::table_view{{c_0, c_1}};
+
+  // (a+b) appears twice inside (a+b)*(a+b), and that whole product appears
+  // twice inside ((a+b)*(a+b)) + ((a+b)*(a+b)). Two layers of sharing
+  // exercise the dedup probe at multiple depths.
+  cudf::ast::tree tree;
+  auto const& col_ref_0 = tree.push(cudf::ast::column_reference(0));
+  auto const& col_ref_1 = tree.push(cudf::ast::column_reference(1));
+  auto const& sum =
+    tree.push(cudf::ast::operation(cudf::ast::ast_operator::ADD, col_ref_0, col_ref_1));
+  auto const& square = tree.push(cudf::ast::operation(cudf::ast::ast_operator::MUL, sum, sum));
+  auto const& root = tree.push(cudf::ast::operation(cudf::ast::ast_operator::ADD, square, square));
+
+  auto result   = Executor::compute_column(table, root);
+  auto expected = column_wrapper<double>{8.0, 18.0, 32.0, 50.0};
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, result->view(), verbosity);
+}
+
+TYPED_TEST(TransformTest, SharedSubtreeWithNulls)
+{
+  using Executor = TypeParam;
+
+  auto c_0   = column_wrapper<int32_t>{{1, 2, 3, 4}, {1, 0, 1, 1}};
+  auto c_1   = column_wrapper<int32_t>{{5, 6, 7, 8}, {1, 1, 0, 1}};
+  auto table = cudf::table_view{{c_0, c_1}};
+
+  // (a+b) * (a+b) with nulls. Null propagation through the shared sub-tree
+  // must produce the same mask as if the sub-tree were duplicated.
+  cudf::ast::tree tree;
+  auto const& col_ref_0 = tree.push(cudf::ast::column_reference(0));
+  auto const& col_ref_1 = tree.push(cudf::ast::column_reference(1));
+  auto const& sum =
+    tree.push(cudf::ast::operation(cudf::ast::ast_operator::ADD, col_ref_0, col_ref_1));
+  auto const& root = tree.push(cudf::ast::operation(cudf::ast::ast_operator::MUL, sum, sum));
+
+  auto result   = Executor::compute_column(table, root);
+  auto expected = column_wrapper<int32_t>{{36, 0, 0, 144}, {1, 0, 0, 1}};
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, result->view(), verbosity);
+}
+
+TYPED_TEST(TransformTest, SharedSubtreeMatchesUnshared)
+{
+  using Executor = TypeParam;
+
+  auto c_0   = column_wrapper<int32_t>{1, 2, 3, 4};
+  auto c_1   = column_wrapper<int32_t>{10, 20, 30, 40};
+  auto table = cudf::table_view{{c_0, c_1}};
+
+  // Build the same expression two ways: once with the sub-tree shared via a
+  // single node referenced twice, once with two distinct sub-tree nodes.
+  // Results must be bit-identical.
+  cudf::ast::tree shared_tree;
+  auto const& shared_col_0 = shared_tree.push(cudf::ast::column_reference(0));
+  auto const& shared_col_1 = shared_tree.push(cudf::ast::column_reference(1));
+  auto const& shared_sum   = shared_tree.push(
+    cudf::ast::operation(cudf::ast::ast_operator::ADD, shared_col_0, shared_col_1));
+  auto const& shared_root =
+    shared_tree.push(cudf::ast::operation(cudf::ast::ast_operator::MUL, shared_sum, shared_sum));
+
+  cudf::ast::tree unshared_tree;
+  auto const& unshared_col_0    = unshared_tree.push(cudf::ast::column_reference(0));
+  auto const& unshared_col_1    = unshared_tree.push(cudf::ast::column_reference(1));
+  auto const& unshared_sum_left = unshared_tree.push(
+    cudf::ast::operation(cudf::ast::ast_operator::ADD, unshared_col_0, unshared_col_1));
+  auto const& unshared_sum_right = unshared_tree.push(
+    cudf::ast::operation(cudf::ast::ast_operator::ADD, unshared_col_0, unshared_col_1));
+  auto const& unshared_root = unshared_tree.push(
+    cudf::ast::operation(cudf::ast::ast_operator::MUL, unshared_sum_left, unshared_sum_right));
+
+  auto shared_result   = Executor::compute_column(table, shared_root);
+  auto unshared_result = Executor::compute_column(table, unshared_root);
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(shared_result->view(), unshared_result->view(), verbosity);
+}
+
 TYPED_TEST(TransformTest, ImbalancedTreeArithmeticDeep)
 {
   using Executor = TypeParam;

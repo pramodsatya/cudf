@@ -22,6 +22,25 @@ namespace ast {
 
 namespace detail {
 
+namespace {
+
+// Counts, per operation pointer, how many parents reference it. Stops at
+// repeat visits so DAGs don't double-count: each operator is counted once
+// per parent that references it, regardless of how many parents the
+// operator itself has.
+void count_parent_refs(expression const& expr,
+                       std::unordered_map<expression const*, cudf::size_type>& counts)
+{
+  if (++counts[&expr] > 1) { return; }
+  if (auto const* op = dynamic_cast<operation const*>(&expr)) {
+    for (auto const& operand : op->get_operands()) {
+      count_parent_refs(operand.get(), counts);
+    }
+  }
+}
+
+}  // namespace
+
 device_data_reference::device_data_reference(device_data_reference_type reference_type,
                                              cudf::data_type data_type,
                                              cudf::size_type data_index,
@@ -63,6 +82,8 @@ expression_parser::expression_parser(
     _has_nulls(has_nulls),
     _has_complex_type{false}
 {
+  count_parent_refs(expr, _parent_count);
+
   expr.accept(*this);
   _has_complex_type =
     std::any_of(_data_references.begin(), _data_references.end(), [&](auto const& ref) {
@@ -217,6 +238,11 @@ cudf::size_type expression_parser::visit(column_reference const& expr)
 
 cudf::size_type expression_parser::visit(operation const& expr)
 {
+  // Reuse the data-references index if this operation was already visited.
+  if (auto const it = _operation_to_data_ref.find(&expr); it != _operation_to_data_ref.end()) {
+    return it->second;
+  }
+
   // Increment the expression index
   auto const expression_index = _expression_count++;
   // Visit children (operands) of this expression
@@ -236,17 +262,19 @@ cudf::size_type expression_parser::visit(operation const& expr)
     CUDF_FAIL("An AST expression was provided non-matching operand types.");
   }
 
-  // Give back intermediate storage locations that are consumed by this operation
-  std::for_each(
-    operand_data_ref_indices.cbegin(),
-    operand_data_ref_indices.cend(),
-    [this](auto const& data_reference_index) {
-      auto const operand_source = _data_references[data_reference_index];
-      if (operand_source.reference_type == detail::device_data_reference_type::INTERMEDIATE) {
-        auto const intermediate_index = operand_source.data_index;
-        _intermediate_counter.give(intermediate_index);
-      }
-    });
+  // Release the intermediate slot for each operand only when the last
+  // consumer of that operand fires. With no CSE every intermediate has
+  // refcount 1, matching the original unconditional release behavior.
+  for (auto const& data_reference_index : operand_data_ref_indices) {
+    auto const& operand_source = _data_references[data_reference_index];
+    if (operand_source.reference_type != detail::device_data_reference_type::INTERMEDIATE) {
+      continue;
+    }
+    auto const refcount_it = _intermediate_refcount.find(data_reference_index);
+    CUDF_EXPECTS(refcount_it != _intermediate_refcount.end(),
+                 "Intermediate refcount missing for an INTERMEDIATE data reference.");
+    if (--refcount_it->second == 0) { _intermediate_counter.give(operand_source.data_index); }
+  }
   // Resolve expression type
   auto const op        = expr.get_operator();
   auto const data_type = cudf::ast::detail::ast_operator_return_type(op, operand_types);
@@ -273,6 +301,17 @@ cudf::size_type expression_parser::visit(operation const& expr)
     }
   }();
   auto const index = add_data_reference(output);
+
+  // Initialize the slot's outstanding-consumer count from _parent_count.
+  // The root output is a column reference, not an intermediate, so it has
+  // no slot to track.
+  if (output.reference_type == detail::device_data_reference_type::INTERMEDIATE) {
+    auto const consumers = _parent_count.find(&expr);
+    _intermediate_refcount[index] =
+      (consumers != _parent_count.end()) ? consumers->second : cudf::size_type{1};
+  }
+  _operation_to_data_ref[&expr] = index;
+
   // Insert source indices from all operands (sources) and this operator (destination)
   _operator_source_indices.insert(_operator_source_indices.end(),
                                   operand_data_ref_indices.cbegin(),
