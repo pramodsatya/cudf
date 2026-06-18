@@ -82,6 +82,32 @@ With `EXT_NEWLINE`, a carriage-return/line-feed pair (`\r\n`) is treated as a si
 | Shorthand | `\W` | Adds all non-word characters to the character class. Matches a single character that is not a word character if used outside character classes. The behavior can be controlled by [cudf::strings::regex_flags::ASCII](@ref cudf::strings::regex_flags) | [`\W`] matches a single character that is not a word character |
 | Shorthand | `\S` | Adds all non-whitespace to the character class. Matches a single character that is not a whitespace character if used outside character classes. The behavior can be controlled by [cudf::strings::regex_flags::ASCII](@ref cudf::strings::regex_flags) | `[\S]` matches a single character that is not a whitespace character |
 
+### Unicode Property Escapes
+
+The `\p{name}` escape matches a single character belonging to the named Unicode
+property, and `\P{name}` matches a single character *not* in that property. The
+single-letter form `\pL` is also accepted for one-letter property names. Property
+escapes may be used on their own or added to a character class (e.g. `[\p{L}\p{Nd}]`).
+
+Only the properties listed below are supported; they are backed by the same
+Unicode character-flags table used by `\d`/`\w`/`\s` and therefore match only
+characters in the Basic Multilingual Plane (code points `<= U+FFFF`). Any other
+property name — including the finer general categories (`Lt`, `Lm`, `Lo`, `M`,
+`P`, `S`, `Z`, `C`) and scripts (e.g. `Latin`) — raises an error rather than
+silently matching the wrong characters. A negated `\P{name}` is not supported
+*inside* a character class; negate the whole class with `[^...]` instead.
+
+| Property | Aliases | Matches | Example |
+| ---------- | ------------- | ------------- | ------------- |
+| `\p{L}` | `Letter`, `Alpha` | Any letter | `\p{L}` matches `a`, `Z`, or `é` |
+| `\p{Lu}` | `Uppercase_Letter`, `Upper` | Any uppercase letter | `\p{Lu}` matches `A` or `É` |
+| `\p{Ll}` | `Lowercase_Letter`, `Lower` | Any lowercase letter | `\p{Ll}` matches `a` or `é` |
+| `\p{N}` | `Number` | Any numeric character | `\p{N}` matches `5` or `½` |
+| `\p{Nd}` | `Decimal_Number`, `Digit` | Any decimal digit | `\p{Nd}` matches `7` |
+| `\p{Alnum}` | | Any letter or number | `\p{Alnum}` matches `a` or `9` |
+| `\p{Space}` | | Any whitespace character | `\p{Space}` matches a space or tab |
+| `\p{Word}` | | Any word character (`\w`) | `\p{Word}` matches `a`, `9`, or `_` |
+
 ### Anchors
 
 | Feature  | Syntax | Description | Example |

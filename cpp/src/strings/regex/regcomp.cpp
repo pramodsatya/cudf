@@ -19,6 +19,7 @@
 #include <stack>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -58,6 +59,46 @@ std::array<char, 5> const quantifiers{{'*', '?', '+', '{', '|'}};
 std::array<char, 33> const escapable_chars{
   {'.', '-', '+',  '*', '\\', '?', '^', '$', '|', '{', '}', '(', ')', '[', ']', '<', '>',
    '"', '~', '\'', '`', '_',  '@', '=', ';', ':', '!', '#', '%', '&', ',', '/', ' '}};
+
+/**
+ * @brief Maps a Unicode-property name to a builtins bitmask.
+ *
+ * The name is the body of a `\p{name}`/`\P{name}` escape (or the single letter of
+ * the `\pN` form). Only those properties representable by the existing Unicode
+ * character-flags table are supported. Finer general categories (e.g. `Lt`, `Lm`,
+ * `Lo`, `M`, `P`, `S`, `Z`, `C`) and scripts (e.g. `Latin`) are intentionally not
+ * handled and return 0 so the caller can raise a clear error. Matching is limited
+ * to the Basic Multilingual Plane, the same as `\w`/`\d`/`\s`.
+ *
+ * @param name Property name to look up
+ * @return builtins bitmask, or 0 if the property is not supported
+ */
+int32_t property_to_builtins(std::string const& name)
+{
+  static std::unordered_map<std::string, int32_t> const property_map{
+    // general-category short names
+    {"L", CCLASS_ALPHA},
+    {"Lu", CCLASS_UPPER},
+    {"Ll", CCLASS_LOWER},
+    {"N", CCLASS_NUMERIC},
+    {"Nd", CCLASS_DECIMAL},
+    // general-category long names
+    {"Letter", CCLASS_ALPHA},
+    {"Uppercase_Letter", CCLASS_UPPER},
+    {"Lowercase_Letter", CCLASS_LOWER},
+    {"Number", CCLASS_NUMERIC},
+    {"Decimal_Number", CCLASS_DECIMAL},
+    // common POSIX/Java aliases (mapped to the Unicode character-flags table)
+    {"Alpha", CCLASS_ALPHA},
+    {"Upper", CCLASS_UPPER},
+    {"Lower", CCLASS_LOWER},
+    {"Digit", CCLASS_DECIMAL},
+    {"Alnum", CCLASS_ALPHA | CCLASS_NUMERIC | CCLASS_DECIMAL},
+    {"Space", CCLASS_S},
+    {"Word", CCLASS_W}};
+  auto const itr = property_map.find(name);
+  return itr == property_map.end() ? 0 : itr->second;
+}
 
 /**
  * @brief Converts UTF-8 string into fixed-width 32-bit character vector.
@@ -242,6 +283,37 @@ class regex_parser {
     return {false, c};
   }
 
+  /**
+   * @brief Parses a Unicode-property escape and returns its builtins bitmask
+   *
+   * The leading backslash and the `p`/`P` have already been consumed, so the
+   * expression position is at the `{` (brace form `\p{name}`) or at the single
+   * property letter (`\pN`). Throws if the name is malformed or unsupported.
+   *
+   * @return builtins bitmask for the named property
+   */
+  int32_t parse_property()
+  {
+    std::string name;
+    if (*_expr_ptr == '{') {
+      ++_expr_ptr;  // consume '{'
+      while (*_expr_ptr != 0 && *_expr_ptr != '}') {
+        name.push_back(static_cast<char>(*_expr_ptr++));
+      }
+      CUDF_EXPECTS(*_expr_ptr == '}',
+                   "invalid regex pattern: unterminated property name at position " +
+                     std::to_string(_expr_ptr - _pattern_begin));
+      ++_expr_ptr;  // consume '}'
+    } else if (*_expr_ptr != 0) {
+      name.push_back(static_cast<char>(*_expr_ptr++));  // single-letter form: \pL
+    }
+    auto const builtins = property_to_builtins(name);
+    CUDF_EXPECTS(builtins != 0,
+                 "invalid regex pattern: unsupported regex property {" + name + "} at position " +
+                   std::to_string(_expr_ptr - _pattern_begin));
+    return builtins;
+  }
+
   // for \d and \D
   void add_ascii_digit_class(std::vector<reclass_range>& ranges, bool negated = false)
   {
@@ -348,6 +420,18 @@ class regex_parser {
             }
             std::tie(is_quoted, chr) = next_char();
             continue;
+          case 'p':
+          case 'P': {
+            // \p{name} adds a Unicode property to the class; negated \P{name}
+            // inside a class is not supported (use [^...] to negate a class)
+            CUDF_EXPECTS(chr == 'p',
+                         "invalid regex pattern: \\P inside a character class is not supported "
+                         "at position " +
+                           std::to_string(_expr_ptr - _pattern_begin));
+            builtins |= parse_property();
+            std::tie(is_quoted, chr) = next_char();
+            continue;
+          }
         }
       }
       if (!is_quoted && chr == ']' && count_char > 1) { break; }  // done
@@ -530,6 +614,12 @@ class regex_parser {
         case 'Z': {
           _chr = chr;
           return EOL;
+        }
+        case 'p':
+        case 'P': {
+          // Unicode property: \p{name} matches, \P{name} negates
+          _cclass_id = _prog.add_class(reclass{parse_property()});
+          return chr == 'p' ? CCLASS : NCCLASS;
         }
         default: {
           // let valid escapable chars fall through as literal CHAR
@@ -1340,6 +1430,11 @@ void reprog::print(regex_flags const flags)
       if (mask & NCCLASS_W) printf(" \\W");
       if (mask & NCCLASS_S) printf(" \\S");
       if (mask & NCCLASS_D) printf(" \\D");
+      if (mask & CCLASS_ALPHA) printf(" \\p{L}");
+      if (mask & CCLASS_UPPER) printf(" \\p{Lu}");
+      if (mask & CCLASS_LOWER) printf(" \\p{Ll}");
+      if (mask & CCLASS_NUMERIC) printf(" \\p{N}");
+      if (mask & CCLASS_DECIMAL) printf(" \\p{Nd}");
     }
     printf("\n");
   }

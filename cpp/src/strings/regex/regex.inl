@@ -169,6 +169,16 @@ __device__ __forceinline__ bool reclass_device::is_match(char32_t const ch,
     return true;
   if ((builtins & NCCLASS_D) && ((ch != '\n') && !IS_DIGIT(fl)))  // \D
     return true;
+  if ((builtins & CCLASS_ALPHA) && IS_ALPHA(fl))  // \p{L}
+    return true;
+  if ((builtins & CCLASS_UPPER) && IS_UPPER(fl))  // \p{Lu}
+    return true;
+  if ((builtins & CCLASS_LOWER) && IS_LOWER(fl))  // \p{Ll}
+    return true;
+  if ((builtins & CCLASS_NUMERIC) && IS_NUMERIC(fl))  // \p{N}
+    return true;
+  if ((builtins & CCLASS_DECIMAL) && IS_DECIMAL(fl))  // \p{Nd}
+    return true;
   //
   return false;
 }
