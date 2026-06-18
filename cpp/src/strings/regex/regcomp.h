@@ -61,6 +61,12 @@ constexpr int32_t CCLASS_D{1 << 2};   // digits [0-9]
 constexpr int32_t NCCLASS_W{1 << 3};  // not CCLASS_W or '\n'
 constexpr int32_t NCCLASS_S{1 << 4};  // not CCLASS_S
 constexpr int32_t NCCLASS_D{1 << 5};  // not CCLASS_D or '\n'
+// Unicode-property (\p{...}) builtins backed by the character-flags table
+constexpr int32_t CCLASS_ALPHA{1 << 6};    // \p{L}  letters
+constexpr int32_t CCLASS_UPPER{1 << 7};    // \p{Lu} uppercase letters
+constexpr int32_t CCLASS_LOWER{1 << 8};    // \p{Ll} lowercase letters
+constexpr int32_t CCLASS_NUMERIC{1 << 9};  // \p{N}  numbers
+constexpr int32_t CCLASS_DECIMAL{1 << 10}; // \p{Nd} decimal digits
 
 /**
  * @brief Structure of an encoded regex instruction

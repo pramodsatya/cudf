@@ -82,6 +82,21 @@ With `EXT_NEWLINE`, a carriage-return/line-feed pair (`\r\n`) is treated as a si
 | Shorthand | `\W` | Adds all non-word characters to the character class. Matches a single character that is not a word character if used outside character classes. The behavior can be controlled by [cudf::strings::regex_flags::ASCII](@ref cudf::strings::regex_flags) | [`\W`] matches a single character that is not a word character |
 | Shorthand | `\S` | Adds all non-whitespace to the character class. Matches a single character that is not a whitespace character if used outside character classes. The behavior can be controlled by [cudf::strings::regex_flags::ASCII](@ref cudf::strings::regex_flags) | `[\S]` matches a single character that is not a whitespace character |
 
+### Unicode Properties
+
+`\p{name}` matches a single character in the named
+[Unicode property](https://www.regular-expressions.info/refunicodepropertyset.html),
+and `\P{name}` matches one that is not. Long names such as `\p{Letter}` and the
+aliases `\p{Alpha}`, `\p{Upper}`, `\p{Lower}`, and `\p{Digit}` are also accepted.
+
+| Feature  | Syntax | Description | Example |
+| ---------- | ------------- | ------------- | ------------- |
+| Letter | `\p{L}` | Matches any letter | `\p{L}` matches `a` or `é` |
+| Uppercase letter | `\p{Lu}` | Matches any uppercase letter | `\p{Lu}` matches `A` or `É` |
+| Lowercase letter | `\p{Ll}` | Matches any lowercase letter | `\p{Ll}` matches `a` or `é` |
+| Number | `\p{N}` | Matches any numeric character | `\p{N}` matches `5` |
+| Decimal digit | `\p{Nd}` | Matches any decimal digit | `\p{Nd}` matches `7` |
+
 ### Anchors
 
 | Feature  | Syntax | Description | Example |

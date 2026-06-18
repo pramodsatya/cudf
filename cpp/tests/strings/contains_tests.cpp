@@ -368,6 +368,13 @@ TEST_F(StringsContainsTests, Errors)
   EXPECT_THROW(cudf::strings::regex_program::create("aaaa{123,5678}"), cudf::logic_error);
 
   EXPECT_THROW(cudf::strings::regex_program::create("[a-C]"), cudf::logic_error);
+
+  // unsupported / malformed unicode property escapes
+  EXPECT_THROW(cudf::strings::regex_program::create("\\p{Foo}"), cudf::logic_error);
+  EXPECT_THROW(cudf::strings::regex_program::create("\\p{P}"), cudf::logic_error);
+  EXPECT_THROW(cudf::strings::regex_program::create("\\p{Latin}"), cudf::logic_error);
+  EXPECT_THROW(cudf::strings::regex_program::create("\\p{L"), cudf::logic_error);
+  EXPECT_THROW(cudf::strings::regex_program::create("[\\P{L}]"), cudf::logic_error);
 }
 
 TEST_F(StringsContainsTests, CountTest)
@@ -614,6 +621,27 @@ TEST_F(StringsContainsTests, NegatedClasses)
     auto results = cudf::strings::count_re(sv, *prog);
     CUDF_TEST_EXPECT_COLUMNS_EQUAL(*results, expected);
   }
+}
+
+TEST_F(StringsContainsTests, UnicodeProperty)
+{
+  // exercises \p{...} / \P{...} backed by the Unicode character-flags table
+  auto input = cudf::test::strings_column_wrapper({"abc123", "Hello World", "", "É1à2", "!!!"});
+  auto sv    = cudf::strings_column_view(input);
+
+  auto test_counts = [&](std::string const& pattern, std::vector<int32_t> const& counts) {
+    auto prog    = cudf::strings::regex_program::create(pattern);
+    auto results = cudf::strings::count_re(sv, *prog);
+    cudf::test::fixed_width_column_wrapper<int32_t> expected(counts.begin(), counts.end());
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(*results, expected);
+  };
+
+  test_counts("\\p{L}", {3, 10, 0, 2, 0});           // letters
+  test_counts("\\p{Nd}", {3, 0, 0, 2, 0});           // decimal digits
+  test_counts("\\p{Lu}", {0, 2, 0, 1, 0});           // uppercase letters
+  test_counts("\\P{L}", {3, 1, 0, 2, 3});            // non-letters (negated)
+  test_counts("[\\p{Lu}\\p{Nd}]", {3, 2, 0, 3, 0});  // two properties in a class
+  test_counts("\\pL+", {1, 2, 0, 2, 0});             // single-letter form + quantifier
 }
 
 TEST_F(StringsContainsTests, IncompleteClassesRange)
