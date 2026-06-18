@@ -286,6 +286,97 @@ class regex_parser {
     return codepoint_to_utf8(std::isupper(cp, lc) ? std::tolower(cp, lc) : std::toupper(cp, lc));
   }
 
+  /**
+   * @brief Parses a POSIX character class `[:name:]` inside a `[...]` expression
+   *
+   * Called when an unquoted `[` has just been read and the next character is `:`.
+   * On success the named class is added to @p ranges and/or @p builtins and the
+   * expression position is advanced past the closing `:]`. If the text is not a
+   * well-formed `[:name:]` (no closing `:]`) it returns false without consuming
+   * anything, so the `[` is handled as a literal (preserving e.g. `[a[b]`).
+   *
+   * The letter/number/space classes follow regex_flags::ASCII just like
+   * `\d`/`\w`/`\s`: Unicode by default, ASCII ranges under the flag. The classes
+   * with no Unicode equivalent (blank/cntrl/xdigit/punct/graph/print/ascii) are
+   * always ASCII. A negated `[:^name:]` or an unknown name raises an error.
+   *
+   * @param ranges Receives literal ranges for the class
+   * @param builtins Receives builtin-class bits for the class
+   * @return true if a POSIX class was parsed and consumed
+   */
+  bool try_add_posix_class(std::vector<reclass_range>& ranges, int32_t& builtins)
+  {
+    // _expr_ptr points at the ':' immediately following the '['
+    auto ptr     = _expr_ptr + 1;  // first character of the name (or '^')
+    bool negated = false;
+    if (*ptr == '^') {
+      negated = true;
+      ++ptr;
+    }
+    auto const name_begin = ptr;
+    while (*ptr != 0 && *ptr != ':') {
+      ++ptr;
+    }
+    // a POSIX class requires a closing ":]"; otherwise '[' is a literal
+    if (*ptr != ':' || *(ptr + 1) != ']') { return false; }
+
+    std::string name;
+    for (auto q = name_begin; q < ptr; ++q) {
+      name.push_back(static_cast<char>(*q));
+    }
+    CUDF_EXPECTS(!negated,
+                 "invalid regex pattern: negated POSIX class [:^" + name +
+                   ":] is not supported at position " + std::to_string(_expr_ptr - _pattern_begin));
+
+    auto const ascii = is_ascii(_flags);
+    auto add         = [&ranges](std::initializer_list<reclass_range> r) {
+      ranges.insert(ranges.end(), r.begin(), r.end());
+    };
+
+    bool known = true;
+    if (name == "alpha") {
+      if (ascii) { add({{'a', 'z'}, {'A', 'Z'}}); } else { builtins |= CCLASS_ALPHA; }
+    } else if (name == "digit") {
+      if (ascii) { add_ascii_digit_class(ranges); } else { builtins |= CCLASS_D; }
+    } else if (name == "alnum") {
+      if (ascii) {
+        add({{'0', '9'}, {'a', 'z'}, {'A', 'Z'}});
+      } else {
+        builtins |= CCLASS_ALPHA | CCLASS_NUMERIC | CCLASS_DECIMAL;
+      }
+    } else if (name == "upper") {
+      if (ascii) { add({{'A', 'Z'}}); } else { builtins |= CCLASS_UPPER; }
+    } else if (name == "lower") {
+      if (ascii) { add({{'a', 'z'}}); } else { builtins |= CCLASS_LOWER; }
+    } else if (name == "space") {
+      if (ascii) { add_ascii_space_class(ranges); } else { builtins |= CCLASS_S; }
+    } else if (name == "word") {
+      if (ascii) { add_ascii_word_class(ranges); } else { builtins |= CCLASS_W; }
+    } else if (name == "blank") {
+      add({{'\t', '\t'}, {' ', ' '}});
+    } else if (name == "cntrl") {
+      add({{0, 0x1F}, {0x7F, 0x7F}});
+    } else if (name == "xdigit") {
+      add({{'0', '9'}, {'A', 'F'}, {'a', 'f'}});
+    } else if (name == "punct") {
+      add({{'!', '/'}, {':', '@'}, {'[', '`'}, {'{', '~'}});
+    } else if (name == "graph") {
+      add({{'!', '~'}});
+    } else if (name == "print") {
+      add({{' ', '~'}});
+    } else if (name == "ascii") {
+      add({{0, 0x7F}});
+    } else {
+      known = false;
+    }
+    CUDF_EXPECTS(known,
+                 "invalid regex pattern: unsupported POSIX class [:" + name + ":] at position " +
+                   std::to_string(_expr_ptr - _pattern_begin));
+
+    _expr_ptr = ptr + 2;  // consume through the closing ":]"
+    return true;
+  }
+
   int32_t build_cclass()
   {
     int32_t type = CCLASS;
@@ -349,6 +440,13 @@ class regex_parser {
             std::tie(is_quoted, chr) = next_char();
             continue;
         }
+      }
+      // POSIX character class [:name:] (e.g. [[:alpha:]]); if '[' does not begin
+      // a well-formed POSIX class it is treated as a literal character below
+      if (!is_quoted && chr == '[' && *_expr_ptr == ':' &&
+          try_add_posix_class(ranges, builtins)) {
+        std::tie(is_quoted, chr) = next_char();
+        continue;
       }
       if (!is_quoted && chr == ']' && count_char > 1) { break; }  // done
 

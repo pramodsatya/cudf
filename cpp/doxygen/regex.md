@@ -82,6 +82,39 @@ With `EXT_NEWLINE`, a carriage-return/line-feed pair (`\r\n`) is treated as a si
 | Shorthand | `\W` | Adds all non-word characters to the character class. Matches a single character that is not a word character if used outside character classes. The behavior can be controlled by [cudf::strings::regex_flags::ASCII](@ref cudf::strings::regex_flags) | [`\W`] matches a single character that is not a word character |
 | Shorthand | `\S` | Adds all non-whitespace to the character class. Matches a single character that is not a whitespace character if used outside character classes. The behavior can be controlled by [cudf::strings::regex_flags::ASCII](@ref cudf::strings::regex_flags) | `[\S]` matches a single character that is not a whitespace character |
 
+### POSIX Character Classes
+
+Inside a `[...]` bracket expression, the POSIX form `[:name:]` adds a named class
+of characters. Note the **double brackets** in actual use: `[[:alpha:]]` is a
+bracket expression containing the POSIX class `alpha`. A single-bracket
+`[:alpha:]` is *not* a POSIX class — it is an ordinary class of the literal
+characters `:`, `a`, `l`, `p`, `h`. Classes may be combined with other items,
+e.g. `[[:alpha:][:digit:]_]`.
+
+The letter, number, and space classes honor
+[cudf::strings::regex_flags::ASCII](@ref cudf::strings::regex_flags) the same way
+`\d`/`\w`/`\s` do: Unicode by default, restricted to ASCII under the flag. The
+remaining classes have no Unicode equivalent and always match ASCII only. A
+negated `[:^name:]` is not supported (negate the whole expression with `[^...]`),
+and an unknown class name raises an error.
+
+| Class | Matches |
+| ---------- | ------------- |
+| `[:alpha:]` | Letters (Unicode, or `[A-Za-z]` with ASCII) |
+| `[:digit:]` | Decimal digits (same as `\d`) |
+| `[:alnum:]` | Letters and numbers |
+| `[:upper:]` | Uppercase letters |
+| `[:lower:]` | Lowercase letters |
+| `[:space:]` | Whitespace (same as `\s`) |
+| `[:word:]` | Word characters (same as `\w`) |
+| `[:blank:]` | Space and tab |
+| `[:cntrl:]` | Control characters (`\x00`-`\x1F`, `\x7F`) |
+| `[:xdigit:]` | Hexadecimal digits (`[0-9A-Fa-f]`) |
+| `[:punct:]` | ASCII punctuation |
+| `[:graph:]` | Visible characters (`\x21`-`\x7E`) |
+| `[:print:]` | Printable characters (`\x20`-`\x7E`) |
+| `[:ascii:]` | Any ASCII character (`\x00`-`\x7F`) |
+
 ### Anchors
 
 | Feature  | Syntax | Description | Example |

@@ -368,6 +368,10 @@ TEST_F(StringsContainsTests, Errors)
   EXPECT_THROW(cudf::strings::regex_program::create("aaaa{123,5678}"), cudf::logic_error);
 
   EXPECT_THROW(cudf::strings::regex_program::create("[a-C]"), cudf::logic_error);
+
+  // unsupported / malformed POSIX character classes
+  EXPECT_THROW(cudf::strings::regex_program::create("[[:foo:]]"), cudf::logic_error);
+  EXPECT_THROW(cudf::strings::regex_program::create("[[:^alpha:]]"), cudf::logic_error);
 }
 
 TEST_F(StringsContainsTests, CountTest)
@@ -614,6 +618,31 @@ TEST_F(StringsContainsTests, NegatedClasses)
     auto results = cudf::strings::count_re(sv, *prog);
     CUDF_TEST_EXPECT_COLUMNS_EQUAL(*results, expected);
   }
+}
+
+TEST_F(StringsContainsTests, PosixClasses)
+{
+  using cudf::strings::regex_flags;
+  // exercises POSIX [:name:] classes inside [...] (double-bracket form)
+  auto input = cudf::test::strings_column_wrapper({"abc123", "Hello World", "", "É1à2", "!!!"});
+  auto sv    = cudf::strings_column_view(input);
+
+  auto test_counts =
+    [&](std::string const& pattern, regex_flags flags, std::vector<int32_t> const& counts) {
+      auto prog    = cudf::strings::regex_program::create(pattern, flags);
+      auto results = cudf::strings::count_re(sv, *prog);
+      cudf::test::fixed_width_column_wrapper<int32_t> expected(counts.begin(), counts.end());
+      CUDF_TEST_EXPECT_COLUMNS_EQUAL(*results, expected);
+    };
+
+  test_counts("[[:alpha:]]", regex_flags::DEFAULT, {3, 10, 0, 2, 0});           // letters (unicode)
+  test_counts("[[:digit:]]", regex_flags::DEFAULT, {3, 0, 0, 2, 0});            // digits
+  test_counts("[[:upper:]]", regex_flags::DEFAULT, {0, 2, 0, 1, 0});            // uppercase (unicode)
+  test_counts("[[:punct:]]", regex_flags::DEFAULT, {0, 0, 0, 0, 3});            // ASCII punctuation
+  test_counts("[[:space:]]", regex_flags::DEFAULT, {0, 1, 0, 0, 0});            // whitespace
+  test_counts("[[:alpha:][:digit:]]", regex_flags::DEFAULT, {6, 10, 0, 4, 0});  // union of classes
+  // the ASCII flag restricts [:alpha:] to [A-Za-z], excluding accented letters
+  test_counts("[[:alpha:]]", regex_flags::ASCII, {3, 10, 0, 0, 0});
 }
 
 TEST_F(StringsContainsTests, IncompleteClassesRange)
