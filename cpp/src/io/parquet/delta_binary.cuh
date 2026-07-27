@@ -33,8 +33,7 @@ namespace cudf::io::parquet::detail {
 // packed using the same encoding as the RLE/Bit-Packing Hybrid encoder.
 
 // Parquet serializes the bit-packed mini-block deltas as a stream of 8-bit bytes, so a bit count is
-// converted to a byte count by dividing by this. It is a property of the Parquet encoding, not the
-// width of the host `char`, which is why it is spelled out here rather than using CHAR_BIT.
+// converted to a byte count by dividing by this.
 constexpr int bits_per_byte = 8;
 
 // The DELTA_BINARY_PACKED spec requires the number of values in a mini-block to be a multiple of
