@@ -525,6 +525,31 @@ CUDF_HOST_DEVICE inline IntegerType guarded_right_shift(IntegerType value, int b
 }
 
 /**
+ * @brief Add half of the least significant retained unit before a truncating right shift
+ *
+ * A floating -> decimal conversion produces its final magnitude with a truncating right shift
+ * `value >> bit_shift`, which rounds toward zero. Adding half of the least significant retained
+ * unit (2^(bit_shift - 1)) before that shift turns it into round-half-away-from-zero, matching the
+ * HALF_UP rounding of CPU decimal engines. Guarded so out-of-range shifts are left unchanged (the
+ * shifted magnitude is then zero either way).
+ *
+ * @tparam IntegerType Type of input unsigned integer value
+ * @param value The integer whose bits are about to be shifted right
+ * @param bit_shift The number of bits the caller will shift right
+ * @return value increased by half the least significant retained unit
+ */
+template <typename IntegerType, CUDF_ENABLE_IF(cuda::std::is_unsigned_v<IntegerType>)>
+CUDF_HOST_DEVICE inline IntegerType add_half_lsb_before_right_shift(IntegerType value, int bit_shift)
+{
+  // 1 << (bit_shift - 1) is well-defined only for bit_shift in [1, digits - 1]. Outside that range
+  // the subsequent guarded_right_shift yields zero, so leaving value untouched is equivalent.
+  constexpr int max_safe_bit_shift = cuda::std::numeric_limits<IntegerType>::digits - 1;
+  return (bit_shift >= 1 && bit_shift <= max_safe_bit_shift)
+           ? static_cast<IntegerType>(value + (static_cast<IntegerType>(1) << (bit_shift - 1)))
+           : value;
+}
+
+/**
  * @brief Helper struct with common constants needed by the floating <--> decimal conversions
  */
 template <typename FloatingType>
@@ -760,13 +785,17 @@ CUDF_HOST_DEVICE inline cuda::std::make_unsigned_t<Rep> shift_to_decimal_pospow(
  * @param base2_value The base-2 fixed-point value we are converting from
  * @param pow2 The number of powers of 2 to apply to convert from base-2
  * @param pow10 The number of powers of 10 to apply to reach the desired scale factor
+ * @param round_half_away Round the truncated magnitude half-away-from-zero instead of toward zero
  * @return Magnitude of the converted-to decimal integer
  */
 template <typename Rep,
           typename FloatingType,
           CUDF_ENABLE_IF(cuda::std::is_floating_point_v<FloatingType>)>
 CUDF_HOST_DEVICE inline cuda::std::make_unsigned_t<Rep> shift_to_decimal_negpow(
-  typename shifting_constants<FloatingType>::IntegerRep base2_value, int pow2, int pow10)
+  typename shifting_constants<FloatingType>::IntegerRep base2_value,
+  int pow2,
+  int pow10,
+  bool round_half_away)
 {
   // This is similar to shift_to_decimal_pospow(), except pow10 < 0 & pow2 < 0
   // See comments in that function for details.
@@ -792,7 +821,11 @@ CUDF_HOST_DEVICE inline cuda::std::make_unsigned_t<Rep> shift_to_decimal_negpow(
       shifting_rep = multiply_power10_32bit(shifting_rep, pow10_mag);
     }
 
-    // Final bit shifting: Shift may be large, guard against UB
+    // Final bit shifting: Shift may be large, guard against UB. When rounding, bias the value by
+    // half the least significant retained unit so the truncating shift rounds half-away-from-zero.
+    if (round_half_away) {
+      shifting_rep = add_half_lsb_before_right_shift(shifting_rep, pow2_mag);
+    }
     return static_cast<UnsignedRep>(guarded_right_shift(shifting_rep, pow2_mag));
   };
 
@@ -846,13 +879,17 @@ CUDF_HOST_DEVICE inline cuda::std::make_unsigned_t<Rep> shift_to_decimal_negpow(
  * @param base2_value The base-2 fixed-point value we are converting from
  * @param pow2 The number of powers of 2 to apply to convert from base-2
  * @param pow10 The number of powers of 10 to apply to reach the desired scale factor
+ * @param round_half_away Round the truncated magnitude half-away-from-zero instead of toward zero
  * @return Integer representation of the floating-point value, given the desired scale
  */
 template <typename Rep,
           typename FloatingType,
           CUDF_ENABLE_IF(cuda::std::is_floating_point_v<FloatingType>)>
 CUDF_HOST_DEVICE inline cuda::std::make_unsigned_t<Rep> convert_floating_to_integral_shifting(
-  typename floating_converter<FloatingType>::IntegralType base2_value, int pow10, int pow2)
+  typename floating_converter<FloatingType>::IntegralType base2_value,
+  int pow10,
+  int pow2,
+  bool round_half_away)
 {
   // Apply the powers of 2 and 10 to convert to decimal.
   // The result will be base2_value * (2^pow2) / (10^pow10)
@@ -870,7 +907,11 @@ CUDF_HOST_DEVICE inline cuda::std::make_unsigned_t<Rep> convert_floating_to_inte
     if (pow2 >= 0) {
       return guarded_left_shift(static_cast<UnsignedRep>(base2_value), pow2);
     } else {
-      return static_cast<UnsignedRep>(guarded_right_shift(base2_value, -pow2));
+      // The right shift truncates toward zero; bias by half the least significant retained unit
+      // first to round half-away-from-zero (e.g. the exact-half cast 2.5 -> 3 at scale 0).
+      auto const biased =
+        round_half_away ? add_half_lsb_before_right_shift(base2_value, -pow2) : base2_value;
+      return static_cast<UnsignedRep>(guarded_right_shift(biased, -pow2));
     }
   } else if (pow10 > 0) {
     if (pow2 <= 0) {
@@ -887,7 +928,7 @@ CUDF_HOST_DEVICE inline cuda::std::make_unsigned_t<Rep> convert_floating_to_inte
       auto const shifted = guarded_left_shift(static_cast<UnsignedRep>(base2_value), pow2);
       return multiply_power10<UnsignedRep>(shifted, -pow10);
     }
-    return shift_to_decimal_negpow<Rep, FloatingType>(base2_value, pow2, pow10);
+    return shift_to_decimal_negpow<Rep, FloatingType>(base2_value, pow2, pow10, round_half_away);
   }
 }
 
@@ -898,13 +939,17 @@ CUDF_HOST_DEVICE inline cuda::std::make_unsigned_t<Rep> convert_floating_to_inte
  * @tparam FloatingType The type of floating-point object we are converting from
  * @param floating The floating point value to convert
  * @param scale The desired base-10 scale factor: decimal value = returned value * 10^scale
+ * @param round_half_away Round half-away-from-zero (HALF_UP) instead of truncating toward zero.
+ * Applies to scale factors that keep fractional information (`scale <= 0`, the DECIMAL(p, s>=0)
+ * domain); a positive `scale` still truncates.
  * @return Integer representation of the floating-point value, given the desired scale
  */
 template <typename Rep,
           typename FloatingType,
           CUDF_ENABLE_IF(cuda::std::is_floating_point_v<FloatingType>)>
 CUDF_HOST_DEVICE inline Rep convert_floating_to_integral(FloatingType const& floating,
-                                                         scale_type const& scale)
+                                                         scale_type const& scale,
+                                                         bool round_half_away = false)
 {
   // Extract components of the floating point number
   using converter        = floating_converter<FloatingType>;
@@ -915,14 +960,22 @@ CUDF_HOST_DEVICE inline Rep convert_floating_to_integral(FloatingType const& flo
   auto const is_negative                  = converter::get_is_negative(integer_rep);
   auto const [significand, floating_pow2] = converter::get_significand_and_pow2(integer_rep);
 
-  // Add half a bit if truncating to yield expected value, see function for discussion.
   auto const pow10 = static_cast<int>(scale);
+
+  // When rounding half-away, bias the truncating final shift by half a unit (below); that subsumes
+  // the half-ulp representation fix, so skip add_half_if_truncates and align the significand the
+  // same way it does (shift left by one, decrement pow2) to keep the shifting math unchanged.
+  // Otherwise add half a bit if truncating to yield the expected value, see function for discussion.
+  using IntegralType = typename converter::IntegralType;
   auto const [base2_value, pow2] =
-    add_half_if_truncates(floating, significand, floating_pow2, pow10);
+    round_half_away
+      ? cuda::std::pair<IntegralType, int>{static_cast<IntegralType>(significand << 1),
+                                           floating_pow2 - 1}
+      : add_half_if_truncates(floating, significand, floating_pow2, pow10);
 
   // Apply the powers of 2 and 10 to convert to decimal.
-  auto const magnitude =
-    convert_floating_to_integral_shifting<Rep, FloatingType>(base2_value, pow10, pow2);
+  auto const magnitude = convert_floating_to_integral_shifting<Rep, FloatingType>(
+    base2_value, pow10, pow2, round_half_away);
 
   // Reapply the sign and return
   // NOTE: Cast can overflow!

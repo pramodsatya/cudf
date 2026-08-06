@@ -126,6 +126,32 @@ std::unique_ptr<column> cast(
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
+ * @brief Casts a floating-point column to a decimal (fixed-point) type, rounding half-away-from-zero
+ *
+ * `cudf::cast` truncates the floating-point value toward zero when converting to decimal. This
+ * variant instead rounds half-away-from-zero (HALF_UP), matching the decimal-cast semantics of CPU
+ * SQL engines (e.g. `CAST(4998.769 AS DECIMAL(15, 2))` yields `4998.77`, not `4998.76`). As with
+ * `cudf::cast`, input `NaN` and `inf` produce nulls in the output.
+ *
+ * Rounding is exact for the target scales in the DECIMAL128 range that keep fractional digits
+ * (`out_type.scale()` in `[-18, 0]`, i.e. DECIMAL(p, s) with `s` in `[0, 18]`); larger fractional
+ * scales fall back to the same behavior as `cudf::cast`.
+ *
+ * @param input Floating-point input column
+ * @param out_type Desired decimal (fixed-point) output type
+ * @param stream CUDA stream used for device memory operations and kernel launches
+ * @param mr Device memory resource used to allocate the returned column's device memory
+ *
+ * @returns Column of `out_type` containing the rounded decimal values
+ * @throw cudf::logic_error if `input` is not floating point or `out_type` is not fixed point
+ */
+std::unique_ptr<column> cast_floating_to_decimal(
+  column_view const& input,
+  data_type out_type,
+  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+
+/**
  * @brief Check if a cast between two datatypes is supported.
  *
  * @param from source type

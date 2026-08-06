@@ -88,8 +88,11 @@ struct unary_cast {
 template <typename _SourceT, typename _TargetT>
 struct fixed_point_unary_cast {
   numeric::scale_type scale;
-  using FixedPointT = std::conditional_t<cudf::is_fixed_point<_SourceT>(), _SourceT, _TargetT>;
-  using DeviceT     = device_storage_type_t<FixedPointT>;
+  // Round floating -> fixed_point half-away-from-zero (HALF_UP) instead of truncating toward zero.
+  // Ignored for every other source/target combination.
+  bool round_half_away = false;
+  using FixedPointT     = std::conditional_t<cudf::is_fixed_point<_SourceT>(), _SourceT, _TargetT>;
+  using DeviceT         = device_storage_type_t<FixedPointT>;
 
   template <typename SourceT = _SourceT, typename TargetT = _TargetT>
   __device__ inline TargetT operator()(DeviceT const element)
@@ -108,7 +111,7 @@ struct fixed_point_unary_cast {
     requires(cudf::is_numeric<_SourceT>() && cudf::is_fixed_point<TargetT>())
   {
     if constexpr (cuda::std::is_floating_point_v<SourceT>) {
-      return convert_floating_to_fixed<TargetT>(element, scale).value();
+      return convert_floating_to_fixed<TargetT>(element, scale, round_half_away).value();
     } else {
       return TargetT{element, scale}.value();
     }
@@ -221,8 +224,14 @@ struct is_convertible_floating_point {
 template <typename _SourceT>
 struct dispatch_unary_cast_to {
   column_view input;
+  // Round floating -> fixed_point half-away-from-zero instead of truncating. Only the
+  // numeric -> fixed_point specialization consults it; every other cast ignores it.
+  bool round_half_away;
 
-  dispatch_unary_cast_to(column_view inp) : input(inp) {}
+  dispatch_unary_cast_to(column_view inp, bool round_half_away = false)
+    : input(inp), round_half_away(round_half_away)
+  {
+  }
 
   template <typename TargetT, typename SourceT = _SourceT>
   std::unique_ptr<column> operator()(data_type type,
@@ -295,7 +304,7 @@ struct dispatch_unary_cast_to {
                       input.begin<SourceT>(),
                       input.end<SourceT>(),
                       output_mutable.begin<DeviceT>(),
-                      fixed_point_unary_cast<SourceT, TargetT>{scale});
+                      fixed_point_unary_cast<SourceT, TargetT>{scale, round_half_away});
 
     if constexpr (cudf::is_floating_point<SourceT>()) {
       // For floating-point values, beside input nulls, we also need to set nulls for the output
@@ -393,8 +402,13 @@ struct dispatch_unary_cast_to {
 
 struct dispatch_unary_cast_from {
   column_view input;
+  // Forwarded to the numeric -> fixed_point cast to request half-away rounding; ignored elsewhere.
+  bool round_half_away;
 
-  dispatch_unary_cast_from(column_view inp) : input(inp) {}
+  dispatch_unary_cast_from(column_view inp, bool round_half_away = false)
+    : input(inp), round_half_away(round_half_away)
+  {
+  }
 
   template <typename T>
   std::unique_ptr<column> operator()(data_type type,
@@ -402,7 +416,8 @@ struct dispatch_unary_cast_from {
                                      rmm::device_async_resource_ref mr)
     requires(cudf::is_fixed_width<T>())
   {
-    return type_dispatcher(type, dispatch_unary_cast_to<T>{input}, type, stream, mr);
+    return type_dispatcher(
+      type, dispatch_unary_cast_to<T>{input, round_half_away}, type, stream, mr);
   }
 
   template <typename T, typename... Args>
@@ -424,6 +439,22 @@ std::unique_ptr<column> cast(column_view const& input,
   return type_dispatcher(input.type(), detail::dispatch_unary_cast_from{input}, type, stream, mr);
 }
 
+std::unique_ptr<column> cast_floating_to_decimal(column_view const& input,
+                                                 data_type type,
+                                                 rmm::cuda_stream_view stream,
+                                                 rmm::device_async_resource_ref mr)
+{
+  CUDF_EXPECTS(is_floating_point(input.type()),
+               "Input of cast_floating_to_decimal must be floating point.");
+  CUDF_EXPECTS(is_fixed_point(type), "Output of cast_floating_to_decimal must be fixed point.");
+
+  return type_dispatcher(input.type(),
+                         detail::dispatch_unary_cast_from{input, /*round_half_away=*/true},
+                         type,
+                         stream,
+                         mr);
+}
+
 struct is_supported_cast_impl {
   template <typename From, typename To>
   bool operator()() const
@@ -441,6 +472,15 @@ std::unique_ptr<column> cast(column_view const& input,
 {
   CUDF_FUNC_RANGE();
   return detail::cast(input, type, stream, mr);
+}
+
+std::unique_ptr<column> cast_floating_to_decimal(column_view const& input,
+                                                 data_type type,
+                                                 rmm::cuda_stream_view stream,
+                                                 rmm::device_async_resource_ref mr)
+{
+  CUDF_FUNC_RANGE();
+  return detail::cast_floating_to_decimal(input, type, stream, mr);
 }
 
 bool is_supported_cast(data_type from, data_type to) noexcept

@@ -34,17 +34,21 @@ namespace CUDF_EXPORT cudf {
  * @tparam Floating The floating-point type to convert from
  * @param floating The floating-point value to convert
  * @param scale The desired scale of the fixed-point value
+ * @param round_half_away Round half-away-from-zero (HALF_UP) instead of truncating toward zero.
+ * Only applies to base-10 fixed point; base-2 fixed point always truncates.
  * @return The converted fixed-point value
  */
 template <typename Fixed,
           typename Floating,
           CUDF_ENABLE_IF(cuda::std::is_floating_point_v<Floating>&& is_fixed_point<Fixed>())>
-CUDF_HOST_DEVICE Fixed convert_floating_to_fixed(Floating floating, numeric::scale_type scale)
+CUDF_HOST_DEVICE Fixed convert_floating_to_fixed(Floating floating,
+                                                 numeric::scale_type scale,
+                                                 bool round_half_away = false)
 {
   using Rep        = typename Fixed::rep;
   auto const value = [&]() {
     if constexpr (Fixed::rad == numeric::Radix::BASE_10) {
-      return numeric::detail::convert_floating_to_integral<Rep>(floating, scale);
+      return numeric::detail::convert_floating_to_integral<Rep>(floating, scale, round_half_away);
     } else {
       return static_cast<Rep>(numeric::detail::shift<Rep, Fixed::rad>(floating, scale));
     }

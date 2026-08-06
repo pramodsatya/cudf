@@ -39,6 +39,14 @@ std::unique_ptr<column> cast(column_view const& input,
                              rmm::device_async_resource_ref mr);
 
 /**
+ * @copydoc cudf::cast_floating_to_decimal
+ */
+std::unique_ptr<column> cast_floating_to_decimal(column_view const& input,
+                                                 data_type type,
+                                                 rmm::cuda_stream_view stream,
+                                                 rmm::device_async_resource_ref mr);
+
+/**
  * @copydoc cudf::is_nan
  */
 std::unique_ptr<column> is_nan(cudf::column_view const& input,

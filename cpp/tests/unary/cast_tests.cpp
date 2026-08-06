@@ -672,6 +672,88 @@ TYPED_TEST(FixedPointTests, CastFromDoubleWithNaNAndInf)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, result->view());
 }
 
+TYPED_TEST(FixedPointTests, CastFloatingToDecimalRoundsHalfUp)
+{
+  using namespace numeric;
+  using decimalXX  = TypeParam;
+  using RepType    = cudf::device_storage_type_t<decimalXX>;
+  using fp_wrapper = cudf::test::fixed_point_column_wrapper<RepType>;
+  using fw_wrapper = cudf::test::fixed_width_column_wrapper<double>;
+
+  // cudf::cast truncates toward zero: 1.235 (stored 1.23499...) -> 1.23, 2.345 -> 2.34.
+  // cast_floating_to_decimal rounds half-away-from-zero to match CPU decimal engines.
+  auto const input     = fw_wrapper{1.235, 2.345, -1.235, 0.005, 4998.769056963132};
+  auto const expected  = fp_wrapper{{124, 235, -124, 1, 499877}, scale_type{-2}};
+  auto const truncated = fp_wrapper{{123, 234, -123, 0, 499876}, scale_type{-2}};
+
+  auto const rounded_result   = cudf::cast_floating_to_decimal(
+    input, make_fixed_point_data_type<decimalXX>(-2));
+  auto const truncated_result = cudf::cast(input, make_fixed_point_data_type<decimalXX>(-2));
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, rounded_result->view());
+  // Regression guard: plain cast still truncates, so the new path is strictly opt-in.
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(truncated, truncated_result->view());
+}
+
+TYPED_TEST(FixedPointTests, CastFloatingToDecimalRoundsExactHalvesAwayFromZero)
+{
+  using namespace numeric;
+  using decimalXX  = TypeParam;
+  using RepType    = cudf::device_storage_type_t<decimalXX>;
+  using fp_wrapper = cudf::test::fixed_point_column_wrapper<RepType>;
+  using fw_wrapper = cudf::test::fixed_width_column_wrapper<double>;
+
+  // Exact half integers (representable in double) round away from zero at scale 0: 0.5 -> 1,
+  // 2.5 -> 3, never toward zero. This exercises the pow10 == 0 half-integer branch.
+  auto const input    = fw_wrapper{0.5, -0.5, 2.5, -2.5};
+  auto const expected = fp_wrapper{{1, -1, 3, -3}, scale_type{0}};
+  auto const result   = cudf::cast_floating_to_decimal(
+    input, make_fixed_point_data_type<decimalXX>(0));
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, result->view());
+}
+
+TYPED_TEST(FixedPointTests, CastFloatingToDecimalPreservesNaNAndInf)
+{
+  using namespace numeric;
+  using decimalXX  = TypeParam;
+  using RepType    = cudf::device_storage_type_t<decimalXX>;
+  using fp_wrapper = cudf::test::fixed_point_column_wrapper<RepType>;
+  using fw_wrapper = cudf::test::fixed_width_column_wrapper<double>;
+
+  auto const NaN  = std::numeric_limits<double>::quiet_NaN();
+  auto const inf  = std::numeric_limits<double>::infinity();
+  auto const null = 0;
+
+  // Same null semantics as cudf::cast: NaN and inf become nulls; finite values round half-away.
+  auto const input    = fw_wrapper{1.235, -inf, NaN, 172.905, inf};
+  auto const expected = fp_wrapper{{124, null, null, 17291, null},
+                                   {true, false, false, true, false},
+                                   scale_type{-2}};
+  auto const result   = cudf::cast_floating_to_decimal(
+    input, make_fixed_point_data_type<decimalXX>(-2));
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, result->view());
+}
+
+TEST_F(FixedPointTestSingleType, CastFloatingToDecimal128LargeIntegralNoOverflow)
+{
+  using namespace numeric;
+  using fp_wrapper = cudf::test::fixed_point_column_wrapper<__int128_t>;
+  using fw_wrapper = cudf::test::fixed_width_column_wrapper<double>;
+
+  // A double at or above 2^52 is already integral (its ulp is >= 1), so it needs no rounding and
+  // must not overflow the DECIMAL128 result. 1e22 as DECIMAL(38, 2) has unscaled value 10^24.
+  __int128_t const ten_to_24 =
+    static_cast<__int128_t>(1'000'000'000'000ULL) * static_cast<__int128_t>(1'000'000'000'000ULL);
+  auto const input    = fw_wrapper{1e22, -1e22, 1.235, 0.5};
+  auto const expected = fp_wrapper{{ten_to_24, -ten_to_24, 124, 50}, scale_type{-2}};
+  auto const result   = cudf::cast_floating_to_decimal(
+    input, cudf::data_type{cudf::type_id::DECIMAL128, -2});
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, result->view());
+}
+
 TYPED_TEST(FixedPointTests, CastFromDoubleLarge)
 {
   using namespace numeric;
