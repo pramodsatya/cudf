@@ -6,11 +6,30 @@
 #include "helpers.hpp"
 
 #include <cudf/detail/nvtx/ranges.hpp>
+#include <cudf/utilities/error.hpp>
 
 #include <jit/cache.hpp>
 
+#include <format>
+
 namespace cudf {
 namespace jit {
+
+namespace {
+// Compute capability of the current device as a two-digit int (e.g. 90 for
+// sm_90). Uses the runtime API so it works on any thread that can see the
+// device, without requiring a current driver context.
+int current_device_compute_capability()
+{
+  int device   = 0;
+  int cc_major = 0;
+  int cc_minor = 0;
+  CUDF_CUDA_TRY(cudaGetDevice(&device));
+  CUDF_CUDA_TRY(cudaDeviceGetAttribute(&cc_major, cudaDevAttrComputeCapabilityMajor, device));
+  CUDF_CUDA_TRY(cudaDeviceGetAttribute(&cc_minor, cudaDevAttrComputeCapabilityMinor, device));
+  return cc_major * 10 + cc_minor;
+}
+}  // namespace
 
 bool is_scalar(cudf::size_type base_column_size, cudf::size_type column_size)
 {
@@ -101,7 +120,10 @@ jitify2::Kernel get_udf_kernel(jitify2::PreprocessedProgramData const& preproces
   constexpr int min_minimal_cuda_version = 12800;  // CUDA 12.8
 
   std::vector<std::string> options;
-  options.emplace_back("-arch=sm_.");
+  // Pass the concrete device architecture instead of jitify's "-arch=sm_."
+  // auto-detect token: the latter resolves the arch via the driver API
+  // (cuCtxGetDevice), which fails on a thread that has no current context.
+  options.emplace_back(std::format("-arch=sm_{}", current_device_compute_capability()));
 
   if (runtime_version >= min_minimal_cuda_version) { options.emplace_back("-minimal"); }
 
