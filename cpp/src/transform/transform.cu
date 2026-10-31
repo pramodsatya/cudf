@@ -33,6 +33,7 @@
 #include <jit/parser.hpp>
 #include <jit/reflect.hpp>
 #include <jit/row_ir.hpp>
+#include <jit/udf_reflection.hpp>
 #include <jit/util.hpp>
 
 #include <algorithm>
@@ -98,6 +99,8 @@ void launch(cudf::kernel const& kernel,
                std::runtime_error);
   kernel.launch({cfg.min_grid_size}, {cfg.block_size}, 0, stream, args);
 }
+
+using jit::as_rtcx_binary_type;
 
 std::tuple<rtcx::blob, lto_binary_type, std::string> instantiate_fragment(
   bool is_null_aware,
@@ -262,18 +265,6 @@ void run(kernel const& kernel,
     reinterpret_cast<mutable_column_device_view_core const*>(input_cols + inputs.size());
   return launch(
     kernel, row_size, d_stencil, user_data, input_cols, output_cols, d_max_error, stream);
-}
-
-rtcx::binary_type as_rtcx_binary_type(lto_binary_type type)
-{
-  switch (type) {
-    case lto_binary_type::LTO_IR: return rtcx::binary_type::LTO_IR;
-    case lto_binary_type::FATBIN: return rtcx::binary_type::FATBIN;
-    default:
-      CUDF_FAIL(
-        std::format("Unrecognized LTO binary type {} for LTO transform", static_cast<int>(type)),
-        std::invalid_argument);
-  }
 }
 
 void run_lto(std::optional<std::tuple<std::span<uint8_t const>, lto_binary_type, char const*>>

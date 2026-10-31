@@ -283,7 +283,7 @@ std::string reflect_udf_signature(bool is_null_aware,
   std::vector<std::string> in_types;
 
   for (auto const& input : inputs) {
-    auto element = reflect_input_element(input, use_physical_types);
+    auto element = reflect_input_value_type(input, use_physical_types);
     in_types.push_back(is_null_aware ? std::format("cuda::std::optional<{}>", element) : element);
   }
 

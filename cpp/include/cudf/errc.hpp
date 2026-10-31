@@ -21,13 +21,21 @@ namespace CUDF_EXPORT cudf {
  */
 
 /**
+ * @brief The underlying integer type used for error codes.
+ *
+ * This type is used to ensure consistent ABI representation with external consumers. e.g. NUMBA's
+ * FFI expects an `int` for error codes.
+ */
+using error_int = int;
+
+/**
  * @brief An enumeration of error codes that can occur during operations.
  *
  * The last 32 codes, `USER_ERROR_0` to `USER_ERROR_31`, are reserved for user-defined functions.
  * libcudf never returns them and gives them no meaning, so a user-defined function can fail a row
  * with any of them and leave its meaning to the caller.
  */
-enum class [[nodiscard]] errc : cuda::std::int8_t {
+enum class [[nodiscard]] errc : error_int {
   SUCCESS             = 0,
   ARITHMETIC_OVERFLOW = 1,
   DIVISION_BY_ZERO    = 2,
