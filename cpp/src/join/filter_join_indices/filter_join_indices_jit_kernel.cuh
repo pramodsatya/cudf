@@ -8,6 +8,7 @@
 #include <cudf/ast/expressions.hpp>
 #include <cudf/join/join.hpp>
 #include <cudf/types.hpp>
+#include <cudf/udf.hpp>
 #include <cudf/utilities/span.hpp>
 
 #include <rmm/device_uvector.hpp>
@@ -54,7 +55,7 @@ filter_join_indices_jit(cudf::table_view const& left,
 /**
  * @copydoc cudf::filter_join_indices_jit(table_view const&, table_view const&,
  *   device_span<size_type const>, device_span<size_type const>,
- *   ast::expression const&, join_kind, cuda::stream_ref,
+ *   ast::expression const&, join_kind, lto_fragments, cuda::stream_ref,
  *   rmm::device_async_resource_ref)
  */
 std::pair<std::unique_ptr<rmm::device_uvector<size_type>>,
@@ -65,6 +66,7 @@ filter_join_indices_jit(cudf::table_view const& left,
                         cudf::device_span<size_type const> right_indices,
                         ast::expression const& predicate,
                         join_kind join_kind,
+                        lto_fragments fragments,
                         cuda::stream_ref stream,
                         cudf::memory_resources mr);
 

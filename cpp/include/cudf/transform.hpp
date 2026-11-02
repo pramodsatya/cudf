@@ -167,6 +167,25 @@ struct transform_program {
                     rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
   /**
+   * @brief Constructs a reusable program for AST expressions that call device functions.
+   *
+   * The expressions' kernel is linked with `fragments`, which define the functions that the
+   * expressions call (see `cudf::ast::jit::call`). The fragments must stay valid until the
+   * constructor returns.
+   *
+   * @param table A table whose schema is used to lower the expression and retrieve its kernel
+   * @param expressions The AST expressions to lower and construct the program from
+   * @param fragments The LTO fragments that define the functions the expressions call
+   * @param stream CUDA stream used for device memory operations during construction
+   * @param mr Device memory resource used for device memory allocations during construction
+   */
+  transform_program(table_view const& table,
+                    std::span<std::reference_wrapper<ast::expression const> const> expressions,
+                    lto_fragments fragments,
+                    cuda::stream_ref stream           = cudf::get_default_stream(),
+                    rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+
+  /**
    * @brief Move constructor for transform_program
    * @param other The transform_program to move from
    */
@@ -398,6 +417,31 @@ std::unique_ptr<column> compute_column_jit(
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
+ * @brief Compute a new column by evaluating an expression tree that calls device functions on a
+ * table using a JIT-compiled kernel.
+ *
+ * The kernel is linked with `fragments`, which define the functions that the expression calls (see
+ * `cudf::ast::jit::call`). The fragments must stay valid until the function returns.
+ *
+ * @throws cudf::logic_error if passed an expression operating on table_reference::RIGHT.
+ * @throws cudf::evaluation_error if the evaluation of the expression results in an error during
+ * execution.
+ *
+ * @param table The table used for expression evaluation
+ * @param expr The root of the expression tree
+ * @param fragments The LTO fragments that define the functions the expression calls
+ * @param stream CUDA stream used for device memory operations and kernel launches
+ * @param mr Device memory resource
+ * @return Output column
+ */
+std::unique_ptr<column> compute_column_jit(
+  table_view const& table,
+  ast::expression const& expr,
+  lto_fragments fragments,
+  cuda::stream_ref stream           = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+
+/**
  * @brief Compute a new table by evaluating expression trees on a table using a JIT-compiled
  * kernel.
  *
@@ -422,6 +466,35 @@ std::unique_ptr<column> compute_column_jit(
 std::unique_ptr<table> compute_table_jit(
   table_view const& table,
   std::span<std::reference_wrapper<ast::expression const> const> expressions,
+  cuda::stream_ref stream           = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Compute a new table by evaluating expression trees that call device functions on a table
+ * using a JIT-compiled kernel.
+ *
+ * The kernel is linked with `fragments`, which define the functions that the expressions call (see
+ * `cudf::ast::jit::call`). The fragments must stay valid until the function returns. Otherwise this
+ * is `compute_table_jit` without fragments.
+ *
+ * @pre `expressions` must not be empty.
+ *
+ * @throws cudf::logic_error if passed an empty collection of expressions.
+ * @throws cudf::logic_error if passed an expression operating on table_reference::RIGHT.
+ * @throws cudf::evaluation_error if the evaluation of the expression results in an error during
+ * execution.
+ *
+ * @param table The table used for expression evaluation
+ * @param expressions Non-empty collection of expression-tree roots, one per output column
+ * @param fragments The LTO fragments that define the functions the expressions call
+ * @param stream CUDA stream used for device memory operations and kernel launches
+ * @param mr Device memory resource
+ * @return Table containing one output column per expression, in the same order as `expressions`
+ */
+std::unique_ptr<table> compute_table_jit(
+  table_view const& table,
+  std::span<std::reference_wrapper<ast::expression const> const> expressions,
+  lto_fragments fragments,
   cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 

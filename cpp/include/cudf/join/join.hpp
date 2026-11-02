@@ -8,6 +8,7 @@
 #include <cudf/ast/expressions.hpp>
 #include <cudf/table/table_view.hpp>
 #include <cudf/types.hpp>
+#include <cudf/udf.hpp>
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/export.hpp>
 #include <cudf/utilities/memory_resource.hpp>
@@ -534,6 +535,40 @@ filter_join_indices_jit(cudf::table_view const& left,
                         cudf::device_span<size_type const> right_indices,
                         cudf::ast::expression const& predicate,
                         cudf::join_kind join_kind,
+                        cuda::stream_ref stream   = cudf::get_default_stream(),
+                        cudf::memory_resources mr = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Filters join indices using a JIT-compiled predicate from an AST expression that calls
+ * device functions.
+ *
+ * The predicate's kernel is linked with `fragments`, which define the functions that the predicate
+ * calls (see `cudf::ast::jit::call`). The fragments must stay valid until the function returns.
+ * Otherwise this is the `filter_join_indices_jit` overload for an AST expression.
+ *
+ * @throw std::invalid_argument if join_kind is not INNER_JOIN, LEFT_JOIN, or FULL_JOIN.
+ * @throw cudf::evaluation_error if the predicate reports an evaluation error.
+ *
+ * @param left The left table for predicate evaluation
+ * @param right The right table for predicate evaluation
+ * @param left_indices Device span of row indices in left table from join
+ * @param right_indices Device span of row indices in right table from join
+ * @param predicate An AST expression that returns a boolean for each pair of rows
+ * @param join_kind The type of join operation (INNER_JOIN, LEFT_JOIN, or FULL_JOIN)
+ * @param fragments The LTO fragments that define the functions the predicate calls
+ * @param stream CUDA stream for operations
+ * @param mr Device memory resource
+ * @return A pair of device vectors [filtered_left_indices, filtered_right_indices]
+ */
+std::pair<std::unique_ptr<rmm::device_uvector<size_type>>,
+          std::unique_ptr<rmm::device_uvector<size_type>>>
+filter_join_indices_jit(cudf::table_view const& left,
+                        cudf::table_view const& right,
+                        cudf::device_span<size_type const> left_indices,
+                        cudf::device_span<size_type const> right_indices,
+                        cudf::ast::expression const& predicate,
+                        cudf::join_kind join_kind,
+                        lto_fragments fragments,
                         cuda::stream_ref stream   = cudf::get_default_stream(),
                         cudf::memory_resources mr = cudf::get_current_device_resource_ref());
 

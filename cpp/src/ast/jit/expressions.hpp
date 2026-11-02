@@ -113,19 +113,14 @@ struct operation : public ast::expression {
 struct udf_call : public ast::expression {
   /**
    * @brief Construct a new udf_call object.
-   * @param function The device function to call
-   * @param output_type The type of the value the function writes
+   * @param callee The device function to call
    * @param args The arguments for this call
    * @param error_policy How a row whose call fails is handled
    */
-  udf_call(device_binary function,
-           data_type output_type,
+  udf_call(function callee,
            std::vector<std::reference_wrapper<expression const>> args,
            cudf::error_policy error_policy)
-    : function_{std::move(function)},
-      output_type_{output_type},
-      args_{std::move(args)},
-      error_policy_{error_policy}
+    : callee_{std::move(callee)}, args_{std::move(args)}, error_policy_{error_policy}
   {
   }
 
@@ -140,14 +135,7 @@ struct udf_call : public ast::expression {
    *
    * @return The device function
    */
-  [[nodiscard]] device_binary const& get_function() const { return function_; }
-
-  /**
-   * @brief Get the type of the value the function writes.
-   *
-   * @return The output type
-   */
-  [[nodiscard]] data_type get_output_type() const { return output_type_; }
+  [[nodiscard]] function const& get_callee() const { return callee_; }
 
   /**
    * @brief Get the arguments.
@@ -188,8 +176,7 @@ struct udf_call : public ast::expression {
     cudf::detail::row_ir::ast_converter& visitor) const override;
 
  private:
-  device_binary function_;
-  data_type output_type_;
+  function callee_;
   std::vector<std::reference_wrapper<expression const>> args_;
   cudf::error_policy error_policy_ = cudf::error_policy::PROPAGATE;
 };

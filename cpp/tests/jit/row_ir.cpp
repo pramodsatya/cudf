@@ -19,8 +19,8 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
-#include <cstdint>
 #include <functional>
+#include <string>
 
 namespace row_ir = cudf::detail::row_ir;
 
@@ -355,6 +355,7 @@ TEST_F(RowIRCudaCodeGenTest, AstConversionBasic)
                                          cudf::table_view{{*column}},
                                          cudf::table_view{},
                                          "expression",
+                                         {},
                                          cudf::get_default_stream(),
                                          cudf::get_current_device_resource_ref());
 
@@ -481,33 +482,42 @@ return cudf::errc::SUCCESS;
   EXPECT_EQ(nullability.size(), 2);
 }
 
+namespace {
+
+// The code generated for one expression over the fixture's table.
+std::string generate_code(cudf::table_view table, cudf::ast::expression const& expr)
+{
+  std::array<std::reference_wrapper<cudf::ast::expression const>, 1> expressions{expr};
+  row_ir::ast_converter converter{
+    cudf::get_default_stream(), cudf::get_current_device_resource_ref(), table, {}};
+  auto [code, null_aware, nullability] =
+    converter.generate_code(row_ir::target::CUDA, expressions, "compute_operation");
+  return code;
+}
+
+}  // namespace
+
 TEST_F(RowIRCudaCodeGenTest, UdfCallCSE)
 {
-  // An LTO callee is declared before the generated function, which keeps its own name. Equal calls
-  // of a pure callee share one evaluation; separate calls of an impure one are never merged.
-  auto const fragment = std::array<uint8_t, 1>{};
-  auto ref            = cudf::ast::column_reference{3};
-  auto code_for       = [&](bool is_pure) {
-    auto const function =
-      cudf::ast::jit::device_binary{fragment, cudf::lto_binary_type::LTO_IR, "f", is_pure};
-    auto const type = cudf::data_type{cudf::type_id::INT32};
-    auto tree       = cudf::ast::tree{};
-    auto& one       = cudf::ast::jit::call(tree, function, type, {ref});
-    auto& two       = cudf::ast::jit::call(tree, function, type, {ref});
-    auto& sum       = tree.push(cudf::ast::operation{cudf::ast::ast_operator::ADD, one, two});
-    std::array<std::reference_wrapper<cudf::ast::expression const>, 1> expressions{sum};
-    row_ir::ast_converter converter{
-      cudf::get_default_stream(), cudf::get_current_device_resource_ref(), table, {}};
-    auto [code, null_aware, nullability] =
-      converter.generate_code(row_ir::target::CUDA, expressions, "compute_operation");
-    return code;
+  // A called function is declared before the generated function. Equal calls of a pure function
+  // share one evaluation; calls of an impure one are never merged.
+  auto const int32 = cudf::ast::jit::function_value{cudf::data_type{cudf::type_id::INT32}};
+  auto ref         = cudf::ast::column_reference{3};
+  auto code_for    = [&](bool is_pure) {
+    auto const f = cudf::ast::jit::function{
+         .symbol = "f", .is_pure = is_pure, .output = int32, .inputs = {int32}};
+    auto tree = cudf::ast::tree{};
+    auto& one = cudf::ast::jit::call(tree, f, {ref});
+    auto& two = cudf::ast::jit::call(tree, f, {ref});
+    auto& sum = tree.push(cudf::ast::operation{cudf::ast::ast_operator::ADD, one, two});
+    return generate_code(table, sum);
   };
 
   auto expected_pure = R"***(extern "C" __device__ cudf::errc f(int32_t* out, int32_t in_0);
 __device__ cudf::errc compute_operation(int32_t* out_0, int32_t in_0)
 {
 int32_t tmp_0 = in_0;
-auto expected__tmp_1 = cudf::detail::row_ir::evaluate_udf<&::f, int32_t>(tmp_0);
+auto expected__tmp_1 = cudf::detail::row_ir::invoke_udf<&::f, int32_t>(tmp_0);
 if(!expected__tmp_1.has_value()) {
  return expected__tmp_1.error();
 }
@@ -522,12 +532,12 @@ return cudf::errc::SUCCESS;
 __device__ cudf::errc compute_operation(int32_t* out_0, int32_t in_0)
 {
 int32_t tmp_0 = in_0;
-auto expected__tmp_1 = cudf::detail::row_ir::evaluate_udf<&::f, int32_t>(tmp_0);
+auto expected__tmp_1 = cudf::detail::row_ir::invoke_udf<&::f, int32_t>(tmp_0);
 if(!expected__tmp_1.has_value()) {
  return expected__tmp_1.error();
 }
 int32_t tmp_1 = expected__tmp_1.value();
-auto expected__tmp_2 = cudf::detail::row_ir::evaluate_udf<&::f, int32_t>(tmp_0);
+auto expected__tmp_2 = cudf::detail::row_ir::invoke_udf<&::f, int32_t>(tmp_0);
 if(!expected__tmp_2.has_value()) {
  return expected__tmp_2.error();
 }
@@ -540,6 +550,38 @@ return cudf::errc::SUCCESS;
 
   EXPECT_EQ(code_for(true), expected_pure);
   EXPECT_EQ(code_for(false), expected_impure);
+}
+
+TEST_F(RowIRCudaCodeGenTest, UdfCallNullableValues)
+{
+  // A nullable input takes the argument's optional. An input that isn't nullable takes the value,
+  // and a row where it is null skips the call. A nullable output is an optional the function
+  // writes.
+  auto const type = cudf::data_type{cudf::type_id::INT32};
+  auto ref        = cudf::ast::column_reference{3};
+  auto const g    = cudf::ast::jit::function{
+       .symbol = "g", .output = {type, true}, .inputs = {{type, false}, {type, true}}};
+  auto tree  = cudf::ast::tree{};
+  auto& call = cudf::ast::jit::call(tree, g, {ref, ref}, cudf::error_policy::NULLIFY);
+
+  auto expected =
+    R"***(extern "C" __device__ cudf::errc g(cuda::std::optional<int32_t>* out, int32_t in_0, cuda::std::optional<int32_t> in_1);
+__device__ cudf::errc compute_operation(cuda::std::optional<int32_t>* out_0, cuda::std::optional<int32_t> in_0)
+{
+cuda::std::optional<int32_t> tmp_0 = in_0;
+cuda::std::optional<int32_t> tmp_1{};
+if(tmp_0.has_value()) {
+auto expected__tmp_1 = cudf::detail::row_ir::invoke_udf<&::g, cuda::std::optional<int32_t>>(*tmp_0, tmp_0);
+if(expected__tmp_1.has_value()) {
+  tmp_1 = expected__tmp_1.value();
+}
+}
+cuda::std::optional<int32_t> tmp_2 = tmp_1;
+*out_0 = tmp_2;
+return cudf::errc::SUCCESS;
+})***";
+
+  EXPECT_EQ(generate_code(table, call), expected);
 }
 
 CUDF_TEST_PROGRAM_MAIN()

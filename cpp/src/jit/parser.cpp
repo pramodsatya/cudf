@@ -444,6 +444,19 @@ std::string parse_single_function_cuda(std::string const& src, std::string const
   while (stop < length && no_comments[stop] != '(') {
     stop++;
   }
+  // Skip the prototypes of functions that the source declares but does not define, such as the
+  // functions it calls from LTO fragments: a prototype's parameter list is followed by `;`.
+  while (stop < length) {
+    auto close = stop;
+    for (int depth = 0; close < length; ++close) {
+      if (no_comments[close] == '(') { ++depth; }
+      if (no_comments[close] == ')' && --depth == 0) { break; }
+    }
+    auto const next = no_comments.find_first_not_of(" \t\r\n", close + 1);
+    if (close == length || next == std::string::npos || no_comments[next] != ';') { break; }
+    stop = no_comments.find('(', next);
+    if (stop == std::string::npos) { stop = length; }
+  }
   CUDF_EXPECTS(stop != length && stop != 0,
                "No CUDA device function found in the input CUDA code.\n");
 

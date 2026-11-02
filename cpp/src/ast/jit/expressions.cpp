@@ -14,12 +14,10 @@
 
 #include <cuda/stream>
 
-#include <algorithm>
 #include <initializer_list>
 #include <memory>
 #include <stdexcept>
 #include <string>
-#include <string_view>
 #include <vector>
 
 namespace cudf {
@@ -189,36 +187,15 @@ expression const& jit::operation(ast::tree& tree,
     detail::operation(as_opcode(operator_id), std::move(args), error_policy, target_scale));
 }
 
-namespace {
-
-// Whether `name` can be declared as an `extern "C"` function.
-bool is_c_identifier(std::string_view name)
-{
-  auto const is_alpha = [](char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); };
-  auto const is_digit = [](char c) { return c >= '0' && c <= '9'; };
-  return !name.empty() && (is_alpha(name.front()) || name.front() == '_') &&
-         std::ranges::all_of(name, [&](char c) { return is_alpha(c) || is_digit(c) || c == '_'; });
-}
-
-}  // namespace
-
 expression const& jit::call(ast::tree& tree,
-                            device_binary const& function,
-                            data_type output_type,
+                            function const& callee,
                             std::vector<std::reference_wrapper<expression const>> const& args,
                             cudf::error_policy error_policy)
 {
-  CUDF_EXPECTS(!args.empty(), "A JIT UDF call needs at least one argument", std::invalid_argument);
-  CUDF_EXPECTS(is_fixed_width(output_type),
+  CUDF_EXPECTS(is_fixed_width(callee.output.type),
                "A JIT UDF call must produce a fixed-width type",
                std::invalid_argument);
-  CUDF_EXPECTS(!function.fragment.empty(),
-               "A JIT UDF call needs the fragment that defines its function",
-               std::invalid_argument);
-  CUDF_EXPECTS(is_c_identifier(function.symbol),
-               "A JIT UDF call's symbol must be a C identifier: " + function.symbol,
-               std::invalid_argument);
-  return tree.push(detail::udf_call(function, output_type, args, error_policy));
+  return tree.push(detail::udf_call(callee, args, error_policy));
 }
 
 expression const& jit::operation(

@@ -5,13 +5,10 @@
 #pragma once
 
 #include <cudf/ast/expressions.hpp>
-#include <cudf/transform.hpp>
 #include <cudf/types.hpp>
 #include <cudf/utilities/export.hpp>
 
-#include <cstdint>
 #include <functional>
-#include <span>
 #include <string>
 #include <vector>
 
@@ -28,74 +25,86 @@ namespace ast::jit {
  */
 
 /**
- * @brief A device function compiled ahead of time to LTO-IR, which a JIT expression can call.
- *
- * `fragment` holds the function's LTO-IR, or a fatbin carrying it. `symbol` is the function's
- * unmangled name. The kernel of an expression that calls the function is compiled to LTO-IR and
- * linked with `fragment`, so the function's body is never compiled at runtime.
- *
- * The function must have the signature
- *
- * ```cpp
- * extern "C" __device__ cudf::errc symbol(R* out, A... in);
- * ```
- *
- * where `R` is the device type of the call's output type and `A...` are the device types of its
- * arguments, passed by value (`int32_t`, `double`, `cudf::timestamp_D`, ...). It returns
- * `cudf::errc::SUCCESS`, or an error code that fails the row, such as one of the codes
- * `cudf::errc::USER_ERROR_0` to `USER_ERROR_31` that libcudf reserves for user-defined functions.
- * The signature is provisional: it will follow the row ABI that libcudf's JIT is moving to.
- *
- * Rules for the function and its fragment:
- * - The signature is not type-checked: a fragment whose function differs from the declaration
- *   cuDF derives from the call has undefined behavior.
- * - cuDF assumes the function is pure: calls with equal arguments return equal results, and no
- *   side effect has to happen on every call. Reading constant data, such as a table compiled into
- *   the fragment, is allowed. Equal calls may then share one evaluation. The caller must set
- *   `is_pure` to `false` for a function that does not meet this, for example one that reads a
- *   clock, a random state, or memory that changes while the kernel runs. cuDF cannot check this
- *   setting, and a wrong one changes results.
- * - A call of a function that is not pure is evaluated at most once per row, however many
- *   expressions refer to it, and is never merged with another call.
- * - The function must be row-local: no warp-collective operations, `__syncthreads` or shared
- *   memory.
- * - The fragment must target an architecture no newer than the device's, such as the one libcudf
- *   compiles its own LTO-IR for.
- * - The fragment must stay valid while expressions that call it are evaluated, and until a
- *   `cudf::transform_program` compiled from them is constructed.
- * - A fragment is identified by its address and size, so every call of one symbol must pass the
- *   same span, and must agree on purity, argument types and output type.
+ * @brief The output or an input of a device function that a JIT expression calls.
  */
-struct device_binary {
-  std::span<uint8_t const> fragment;                      ///< The function's LTO-IR or fatbin
-  lto_binary_type binary_type = lto_binary_type::LTO_IR;  ///< What `fragment` holds
-  std::string symbol;                                     ///< The function's unmangled name
-  bool is_pure = true;  ///< Whether equal calls may share one evaluation
+struct function_value {
+  data_type type;            ///< The value's type
+  bool is_nullable = false;  ///< Whether the value is passed as a `cuda::std::optional`
+
+  /**
+   * @brief Compares the type and nullability of two values.
+   *
+   * @param other The value to compare with
+   * @return Whether the values are equal
+   */
+  bool operator==(function_value const& other) const = default;
 };
 
 /**
- * @brief Creates a JIT expression that calls a consumer-supplied device function.
+ * @brief A device function that JIT expressions call.
+ *
+ * The function is defined in one of the LTO fragments passed to the JIT evaluator, such as
+ * `cudf::compute_column_jit`, which links all of them into its kernel; `symbol` selects the
+ * function. Its parameters follow the conventions of `cudf::lto_fragment`: a pointer to the output,
+ * then the inputs by value. It returns `cudf::errc::SUCCESS`, or a code that fails the row, such as
+ * `cudf::errc::USER_RESERVED + n`. A function with an `INT32` output and two `INT32` inputs, the
+ * second of them nullable, is defined as
+ *
+ * ```cpp
+ * extern "C" __device__ cudf::errc f(int32_t* out, int32_t a, cuda::std::optional<int32_t> b);
+ * ```
+ *
+ * The generated code declares the function from `output` and `inputs`, which must match its
+ * definition; a mismatch has undefined behavior.
+ *
+ * - An input that is not nullable is passed as a value. A row whose argument for it is null skips
+ *   the call, and its result is null.
+ * - A nullable input is passed as a `cuda::std::optional`, empty for a null argument.
+ * - A function with a nullable output writes a `cuda::std::optional`, and leaves it empty to
+ *   produce a null.
+ * - cuDF assumes the function is pure: calls with equal arguments return equal results, and no
+ *   side effect has to happen on every call. Equal calls may then share one evaluation. Set
+ *   `is_pure` to `false` for a function that does not meet this, for example one that reads a
+ *   clock or a random state, so that each of its calls is evaluated. cuDF cannot check this
+ *   setting, and a wrong one changes results.
+ * - The function must be row-local: no warp-collective operations, `__syncthreads` or shared
+ *   memory.
+ */
+struct function {
+  std::string symbol;                  ///< The function's unmangled name
+  bool is_pure = true;                 ///< Whether equal calls may share one evaluation
+  function_value output;               ///< The value the function writes
+  std::vector<function_value> inputs;  ///< The values the function reads, in parameter order
+
+  /**
+   * @brief Compares the name, purity and signature of two functions.
+   *
+   * @param other The function to compare with
+   * @return Whether the functions are equal
+   */
+  bool operator==(function const& other) const = default;
+};
+
+/**
+ * @brief Creates a JIT expression that calls a device function.
  *
  * The call is part of the generated JIT kernel, so it fuses with the surrounding expression. It
- * can only be evaluated by the JIT evaluators, such as `cudf::compute_column_jit`.
+ * can only be evaluated by the JIT evaluators, which are given the LTO fragments that define the
+ * function. All calls of one symbol in the evaluated expressions must declare the same function.
  *
- * A row with a null argument skips the call and produces null. A failing row raises
- * `cudf::evaluation_error` under `error_policy::PROPAGATE`, and produces null under
- * `error_policy::NULLIFY`.
+ * A row whose call fails raises `cudf::evaluation_error` under `error_policy::PROPAGATE`, and
+ * produces null under `error_policy::NULLIFY`.
  *
- * @throws std::invalid_argument if `output_type` is not fixed-width, `args` is empty, `function`
- * has no fragment, or `function.symbol` is not a C identifier
+ * @throws std::invalid_argument if `callee.output.type` is not fixed-width
  *
  * @param tree The expression tree to which this expression will be added
- * @param function The device function to call
- * @param output_type The type of the value the function writes
- * @param args The call's arguments
+ * @param callee The device function to call
+ * @param args The call's arguments, one for each of `callee.inputs` and of its type
  * @param error_policy How a row whose call fails is handled
  * @return A reference to the created call expression
  */
 expression const& call(ast::tree& tree,
-                       device_binary const& function,
-                       data_type output_type,
+                       function const& callee,
                        std::vector<std::reference_wrapper<expression const>> const& args,
                        cudf::error_policy error_policy = cudf::error_policy::PROPAGATE);
 

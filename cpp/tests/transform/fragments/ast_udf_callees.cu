@@ -3,11 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Device functions that AST JIT expressions call (cudf::ast::jit::call with a device_binary), in
+// Device functions that AST JIT expressions call (cudf::ast::jit::call), in
 // tests/ast/jit_expressions_tests.cpp and tests/join/mixed_join_tests.cu.
 
 #include <cudf/errc.hpp>
 #include <cudf/wrappers/timestamps.hpp>
+
+#include <cuda/std/optional>
 
 extern "C" __device__ cudf::errc lto_add_one(int32_t* out, int32_t a)
 {
@@ -39,7 +41,8 @@ extern "C" __device__ cudf::errc lto_checked_hundred_over(int32_t* out, int32_t 
   return cudf::errc::SUCCESS;
 }
 
-// Fails a row with the error code it is given; zero succeeds.
+// Fails a row with the error code it is given, such as `cudf::errc::USER_RESERVED + n`; zero
+// succeeds.
 extern "C" __device__ cudf::errc lto_fail_with(int32_t* out, int32_t code)
 {
   *out = code;
@@ -71,6 +74,34 @@ __device__ unsigned long long issued_ids = 0;
 extern "C" __device__ cudf::errc lto_next_id(int64_t* out, int32_t)
 {
   *out = static_cast<int64_t>(atomicAdd(&issued_ids, 1ULL));
+  return cudf::errc::SUCCESS;
+}
+
+// Takes no arguments.
+extern "C" __device__ cudf::errc lto_forty_two(int32_t* out)
+{
+  *out = 42;
+  return cudf::errc::SUCCESS;
+}
+
+// Takes no arguments and returns a new number on every call, so it is not pure.
+extern "C" __device__ cudf::errc lto_next_ticket(int64_t* out)
+{
+  *out = static_cast<int64_t>(atomicAdd(&issued_ids, 1ULL));
+  return cudf::errc::SUCCESS;
+}
+
+// Takes a nullable argument and counts a null as zero.
+extern "C" __device__ cudf::errc lto_zero_if_null(int32_t* out, cuda::std::optional<int32_t> a)
+{
+  *out = a.value_or(0);
+  return cudf::errc::SUCCESS;
+}
+
+// Writes a nullable result: null for a negative argument.
+extern "C" __device__ cudf::errc lto_null_if_negative(cuda::std::optional<int32_t>* out, int32_t a)
+{
+  *out = a < 0 ? cuda::std::optional<int32_t>{} : cuda::std::optional<int32_t>{a};
   return cudf::errc::SUCCESS;
 }
 

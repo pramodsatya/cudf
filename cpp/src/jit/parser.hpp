@@ -212,6 +212,9 @@ std::string parse_single_function_ptx(std::string const& src,
  * of a device function, locate the function and replace its function name
  * with the specified one.
  *
+ * Prototypes of functions that the code declares but does not define, which can precede the
+ * function, are skipped.
+ *
  * @param src The input CUDA code.
  * @param function_name The User defined function that the output CUDA function
  * will have.

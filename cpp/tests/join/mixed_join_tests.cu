@@ -31,6 +31,7 @@
 #include <cudf_test_fragments.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <numeric>
 #include <random>
@@ -1063,19 +1064,19 @@ TEST_F(MixedInnerJoinTest2, UdfCallPredicate)
 
   // transform/fragments/ast_udf_callees.cu
   auto const range = cudf_test_fragments::file_ranges[cudf_test_fragments::ast_udf_callees];
-  auto const xor_popcount =
-    cudf::ast::jit::device_binary{cudf_test_fragments::files.subspan(range[0], range[1]),
-                                  cudf::lto_binary_type::FATBIN,
-                                  "lto_xor_popcount",
-                                  true};
+  auto const fragments =
+    std::array{cudf::lto_fragment{.type = cudf::lto_binary_type::FATBIN,
+                                  .data = cudf_test_fragments::files.subspan(range[0], range[1])}};
+  auto const int32        = cudf::ast::jit::function_value{cudf::data_type{cudf::type_id::INT32}};
+  auto const xor_popcount = cudf::ast::jit::function{
+    .symbol = "lto_xor_popcount", .output = int32, .inputs = {int32, int32}};
 
   auto tree       = cudf::ast::tree{};
   auto left_ref   = cudf::ast::column_reference(0, cudf::ast::table_reference::LEFT);
   auto right_ref  = cudf::ast::column_reference(0, cudf::ast::table_reference::RIGHT);
   auto one        = cudf::numeric_scalar<int32_t>(1);
   auto& one_value = tree.push(cudf::ast::literal(one));
-  auto& popcount  = cudf::ast::jit::call(
-    tree, xor_popcount, cudf::data_type{cudf::type_id::INT32}, {left_ref, right_ref});
+  auto& popcount  = cudf::ast::jit::call(tree, xor_popcount, {left_ref, right_ref});
   auto& predicate =
     tree.push(cudf::ast::operation(cudf::ast::ast_operator::LESS_EQUAL, popcount, one_value));
 
@@ -1085,7 +1086,8 @@ TEST_F(MixedInnerJoinTest2, UdfCallPredicate)
                                   cudf::device_span<cudf::size_type const>(*hash_result.first),
                                   cudf::device_span<cudf::size_type const>(*hash_result.second),
                                   predicate,
-                                  cudf::join_kind::INNER_JOIN);
+                                  cudf::join_kind::INNER_JOIN,
+                                  fragments);
 
   auto left_view  = cudf::column_view(cudf::data_type{cudf::type_to_id<cudf::size_type>()},
                                      result.first->size(),
