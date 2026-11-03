@@ -301,7 +301,10 @@ __device__ constexpr auto evaluate(cuda::std::optional<T>... args)
 /**
  * @brief Calls a consumer device function `F` with the signature `cudf::errc F(R* out, T... in)`.
  *
- * `R` and each of `T` are `cuda::std::optional` for a value the function declares nullable.
+ * `R` and each of `T` are `cuda::std::optional` for a value the function declares nullable. `F`
+ * returns `SUCCESS` or a positive code: the kernels keep the highest code of their rows, starting
+ * from `SUCCESS`, so a negative one would be lost. A DECIMAL `R` is stored by its unscaled value at
+ * the output column's scale, ignoring the scale `F` sets.
  *
  * @return The value `F` wrote, or the error code it returned
  */

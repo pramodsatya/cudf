@@ -1052,6 +1052,22 @@ std::string lto_declaration(ast::jit::function const& callee)
   return std::format("extern \"C\" __device__ cudf::errc {}({});\n", callee.symbol, params);
 }
 
+/**
+ * @brief The fragments to link, without repeats: fragments with equal type and bytes define the
+ * same symbols, which linking both would define twice.
+ */
+std::vector<lto_fragment> distinct_fragments(lto_fragments fragments)
+{
+  std::vector<lto_fragment> distinct;
+  for (auto const& fragment : fragments) {
+    auto const is_equal = [&](lto_fragment const& other) {
+      return other.type == fragment.type && std::ranges::equal(other.data, fragment.data);
+    };
+    if (std::ranges::none_of(distinct, is_equal)) { distinct.push_back(fragment); }
+  }
+  return distinct;
+}
+
 }  // namespace
 
 bool is_nullable(scalar_input const& in)
@@ -1240,7 +1256,7 @@ transform_args ast_converter::compute_table(
                                  .outputs              = std::move(outputs),
                                  .string_offsets{},
                                  .row_size  = row_size,
-                                 .fragments = {fragments.begin(), fragments.end()}};
+                                 .fragments = distinct_fragments(fragments)};
   if (get_context().dump_codegen()) {
     std::cout << "Generated code for transform: \n" << result.udf << std::endl;
   }

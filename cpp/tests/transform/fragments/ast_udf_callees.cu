@@ -7,6 +7,7 @@
 // tests/ast/jit_expressions_tests.cpp and tests/join/mixed_join_tests.cu.
 
 #include <cudf/errc.hpp>
+#include <cudf/strings/string_view.cuh>
 #include <cudf/wrappers/timestamps.hpp>
 
 #include <cuda/std/optional>
@@ -102,6 +103,24 @@ extern "C" __device__ cudf::errc lto_zero_if_null(int32_t* out, cuda::std::optio
 extern "C" __device__ cudf::errc lto_null_if_negative(cuda::std::optional<int32_t>* out, int32_t a)
 {
   *out = a < 0 ? cuda::std::optional<int32_t>{} : cuda::std::optional<int32_t>{a};
+  return cudf::errc::SUCCESS;
+}
+
+// Whether a string starts with a prefix.
+extern "C" __device__ cudf::errc lto_starts_with(bool* out,
+                                                 cudf::string_view s,
+                                                 cudf::string_view prefix)
+{
+  *out = s.size_bytes() >= prefix.size_bytes() &&
+         cudf::string_view{s.data(), prefix.size_bytes()} == prefix;
+  return cudf::errc::SUCCESS;
+}
+
+// Takes a nullable string and writes its size in bytes, or -1 for a null.
+extern "C" __device__ cudf::errc lto_size_bytes_or_minus_one(
+  int32_t* out, cuda::std::optional<cudf::string_view> s)
+{
+  *out = s.has_value() ? s->size_bytes() : -1;
   return cudf::errc::SUCCESS;
 }
 

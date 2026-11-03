@@ -162,6 +162,24 @@ TEST_F(JITExpressionTest, UdfCallLinksManyFragments)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, result->view(), VERBOSITY);
 }
 
+TEST_F(JITExpressionTest, UdfCallLinksEqualFragmentsOnce)
+{
+  // A fragment passed twice, and a copy of it, are linked once, so their functions are not defined
+  // more than once.
+  auto a         = column_wrapper<int32_t>{{1, 2, 3}};
+  auto expected  = column_wrapper<int32_t>{{2, 3, 4}};
+  auto table     = cudf::table_view{{a}};
+  auto tree      = cudf::ast::tree{};
+  auto a_ref     = cudf::ast::column_reference(0);
+  auto& call     = cudf::ast::jit::call(tree, int32_function("lto_add_one"), {a_ref});
+  auto fragment  = test_fragment(cudf_test_fragments::ast_udf_callees);
+  auto copy      = std::vector<uint8_t>(fragment.data.begin(), fragment.data.end());
+  auto fragments = std::array{fragment, fragment, cudf::lto_fragment{fragment.type, copy}};
+  auto result    = cudf::compute_column_jit(table, call, fragments);
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, result->view(), VERBOSITY);
+}
+
 TEST_F(JITExpressionTest, UdfCallIsNotHiddenByGeneratedNames)
 {
   // The generated function has a parameter `in_0` and a local `tmp_0`: 2(a + 1).
@@ -261,18 +279,26 @@ TEST_F(JITExpressionTest, UdfCallWithoutArguments)
     differences.begin(), differences.end(), [](int64_t difference) { return difference == 0; }));
 }
 
-TEST_F(JITExpressionTest, UdfCallPropagatesNulls)
+TEST_F(JITExpressionTest, UdfCallSkipsNullRows)
 {
-  // A row with a null argument for an input that isn't nullable skips the call.
-  auto a        = column_wrapper<int32_t>{{1, 2, 3}, {1, 0, 1}};
-  auto expected = column_wrapper<int32_t>{{2, 0, 4}, {1, 0, 1}};
+  // A row with a null argument for an input that isn't nullable skips the call: the null row holds
+  // -2, which lto_checked_halve fails on.
+  auto a        = column_wrapper<int32_t>{{8, -2, 6}, {1, 0, 1}};
+  auto expected = column_wrapper<int32_t>{{4, 0, 3}, {1, 0, 1}};
   auto table    = cudf::table_view{{a}};
   auto tree     = cudf::ast::tree{};
   auto a_ref    = cudf::ast::column_reference(0);
-  auto& call    = cudf::ast::jit::call(tree, int32_function("lto_add_one"), {a_ref});
-  auto result   = cudf::compute_column_jit(table, call, callees());
+  auto& halve   = cudf::ast::jit::call(tree, int32_function("lto_checked_halve"), {a_ref});
 
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, result->view(), VERBOSITY);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(
+    expected, cudf::compute_column_jit(table, halve, callees())->view(), VERBOSITY);
+
+  // Two outputs over a nullable input take the null-aware path.
+  auto expressions =
+    std::to_array<std::reference_wrapper<cudf::ast::expression const>>({halve, halve});
+  auto result = cudf::compute_table_jit(table, expressions, callees());
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, result->view().column(0), VERBOSITY);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, result->view().column(1), VERBOSITY);
 }
 
 TEST_F(JITExpressionTest, UdfCallNullableInput)
@@ -425,6 +451,41 @@ TEST_F(JITExpressionTest, UdfCallOverTimestamps)
   auto result  = cudf::compute_column_jit(table, same, callees());
 
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(column_wrapper<bool>{{true, true}}, result->view(), VERBOSITY);
+}
+
+TEST_F(JITExpressionTest, UdfCallOverStrings)
+{
+  // A STRING input is passed as a cudf::string_view, from a column or a literal, and a nullable one
+  // as a cuda::std::optional of it.
+  auto s      = cudf::test::strings_column_wrapper({"apple", "", "kiwi", "apricot"}, {1, 1, 0, 1});
+  auto ap     = cudf::string_scalar("ap");
+  auto table  = cudf::table_view{{s}};
+  auto tree   = cudf::ast::tree{};
+  auto s_ref  = cudf::ast::column_reference(0);
+  auto prefix = cudf::ast::literal(ap);
+  auto type   = cudf::data_type{cudf::type_id::STRING};
+  auto const starts_with =
+    cudf::ast::jit::function{.symbol = "lto_starts_with",
+                             .output = {cudf::data_type{cudf::type_id::BOOL8}},
+                             .inputs = {{type}, {type}}};
+  auto const size_bytes = cudf::ast::jit::function{
+    .symbol = "lto_size_bytes_or_minus_one", .output = {int32_type}, .inputs = {{type, true}}};
+  auto& starts         = cudf::ast::jit::call(tree, starts_with, {s_ref, prefix});
+  auto& sizes          = cudf::ast::jit::call(tree, size_bytes, {s_ref});
+  auto expected_starts = column_wrapper<bool>{{true, false, false, true}, {1, 1, 0, 1}};
+  auto expected_sizes  = column_wrapper<int32_t>{{5, 0, -1, 7}};
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(
+    expected_starts, cudf::compute_column_jit(table, starts, callees())->view(), VERBOSITY);
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(
+    expected_sizes, cudf::compute_column_jit(table, sizes, callees())->view(), VERBOSITY);
+
+  // Both outputs at once take the null-aware path.
+  auto expressions =
+    std::to_array<std::reference_wrapper<cudf::ast::expression const>>({starts, sizes});
+  auto result = cudf::compute_table_jit(table, expressions, callees());
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected_starts, result->view().column(0), VERBOSITY);
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(expected_sizes, result->view().column(1), VERBOSITY);
 }
 
 TEST_F(JITExpressionTest, UdfCallInTransformProgram)

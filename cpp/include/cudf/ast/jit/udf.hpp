@@ -45,14 +45,17 @@ struct function_value {
  *
  * The function is defined in one of the LTO fragments passed to the JIT evaluator, such as
  * `cudf::compute_column_jit`, which links all of them into its kernel; `symbol` selects the
- * function. Its parameters follow the conventions of `cudf::lto_fragment`: a pointer to the output,
- * then the inputs by value. It returns `cudf::errc::SUCCESS`, or a code that fails the row, such as
- * `cudf::errc::USER_RESERVED + n`. A function with an `INT32` output and two `INT32` inputs, the
- * second of them nullable, is defined as
+ * function. Fragments with equal type and bytes are linked once, but two different fragments must
+ * not define the same symbol.
  *
- * ```cpp
+ * The function's parameters follow the conventions of `cudf::lto_fragment`: a pointer to the
+ * output, then the inputs by value. It returns `cudf::errc::SUCCESS`, or a positive code that fails
+ * the row, such as `cudf::errc::USER_RESERVED + n`. A function with an `INT32` output and two
+ * `INT32` inputs, the second of them nullable, is defined as
+ *
+ * @code{.cpp}
  * extern "C" __device__ cudf::errc f(int32_t* out, int32_t a, cuda::std::optional<int32_t> b);
- * ```
+ * @endcode
  *
  * The generated code declares the function from `output` and `inputs`, which must match its
  * definition; a mismatch has undefined behavior.
@@ -62,6 +65,11 @@ struct function_value {
  * - A nullable input is passed as a `cuda::std::optional`, empty for a null argument.
  * - A function with a nullable output writes a `cuda::std::optional`, and leaves it empty to
  *   produce a null.
+ * - A STRING input is passed as a `cudf::string_view`. The output must be fixed-width.
+ * - A DECIMAL output is stored as its unscaled value at the scale of `output.type`, so the function
+ *   must write it at that scale; the scale it sets is ignored.
+ * - A negative error code is not supported: under `cudf::error_policy::PROPAGATE` it raises no
+ *   error, and the row's result is undefined.
  * - cuDF assumes the function is pure: calls with equal arguments return equal results, and no
  *   side effect has to happen on every call. Equal calls may then share one evaluation. Set
  *   `is_pure` to `false` for a function that does not meet this, for example one that reads a
@@ -69,6 +77,8 @@ struct function_value {
  *   setting, and a wrong one changes results.
  * - The function must be row-local: no warp-collective operations, `__syncthreads` or shared
  *   memory.
+ * - `symbol` must not name a function that the JIT kernel already declares, such as `transform`
+ *   or `round`.
  */
 struct function {
   std::string symbol;                  ///< The function's unmangled name
